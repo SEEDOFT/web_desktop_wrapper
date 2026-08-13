@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+.pytest_cache/
+.env
+.build-tools/
+.python-x86/
+installer/downloads/
+installer/builds/
+installer/output/
+installer/staging/
+macos/output/
+macos/staging/
+assets/*.icns

@@ -1,0 +1,6 @@
+-r requirements.txt
+pyobjc-core>=10,<12
+pyobjc-framework-Cocoa>=10,<12
+pyobjc-framework-Quartz>=10,<12
+pyobjc-framework-WebKit>=10,<12
+pyobjc-framework-security>=10,<12

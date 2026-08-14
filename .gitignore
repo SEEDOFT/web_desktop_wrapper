@@ -15,3 +15,4 @@ installer/staging/
 macos/output/
 macos/staging/
 assets/*.icns
+.DS_Store

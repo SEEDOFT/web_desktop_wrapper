@@ -37,8 +37,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run(command: list[str], *, environment: dict[str, str] | None = None) -> None:
-    subprocess.run(command, cwd=PROJECT_ROOT, env=environment, check=True)
+def run(
+    command: list[str],
+    *,
+    environment: dict[str, str] | None = None,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, cwd=PROJECT_ROOT, env=environment, check=check, text=True, capture_output=True)
 
 
 def sha256_file(path: Path) -> str:
@@ -76,7 +81,7 @@ def validate_environment() -> None:
     if sys.platform != "darwin":
         raise SystemExit("The macOS application must be built on macOS.")
 
-    for command in ("lipo", "iconutil", "hdiutil", "ditto"):
+    for command in ("lipo", "iconutil", "hdiutil", "ditto", "codesign", "xattr"):
         if shutil.which(command) is None:
             raise SystemExit(f"Missing required macOS build tool: {command}")
 
@@ -171,6 +176,15 @@ def configure_bundle() -> None:
         plistlib.dump(plist, handle)
 
 
+def sign_bundle(path: Path) -> None:
+    run(["codesign", "--force", "--deep", "--sign", "-", "--options", "runtime", str(path)])
+    result = run(["xattr", "-d", "com.apple.quarantine", str(path)], check=False)
+    if result.returncode not in (0, 1):
+        raise SystemExit(
+            f"Failed to clear quarantine flag for {path}: {result.stderr.strip() or result.stdout.strip() or 'unknown error'}"
+        )
+
+
 def create_distribution(skip_dmg: bool) -> None:
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(APP_PATH), str(ZIP_PATH)])
@@ -183,6 +197,7 @@ def create_distribution(skip_dmg: bool) -> None:
     shutil.copytree(APP_PATH, staging / APP_PATH.name)
     (staging / "Applications").symlink_to("/Applications")
     run(["hdiutil", "create", "-volname", APP_NAME, "-srcfolder", str(staging), "-ov", "-format", "UDZO", str(DMG_PATH)])
+    sign_bundle(DMG_PATH)
     write_checksum(DMG_PATH)
 
 
@@ -230,6 +245,7 @@ def main() -> int:
         EMBEDDED_CONFIG_PATH.write_text(original_content, encoding="utf-8")
 
     configure_bundle()
+    sign_bundle(APP_PATH)
     run(["lipo", "-info", str(APP_PATH / "Contents" / "MacOS" / APP_NAME)])
     create_distribution(args.skip_dmg)
     print(f"Build complete: {DMG_PATH if not args.skip_dmg else ZIP_PATH}")

@@ -118,6 +118,7 @@ python3 -m pip install -r requirements-macos.txt
 | `RUN_ON_STARTUP`              | `false`              | Launch application automatically on system startup / login                            |
 | `ALLOW_FILE_DROP`             | `false`              | Permit dragging and dropping external local files to navigate the browser window      |
 | `APP_WRAPPER_VERSION`         | `1.0.0`              | Wrapper version sent in the `X-Wrapper-Version` HTTP request header on every request  |
+| `EMBEDDED_WEBVIEW`            | `true`               | Use native embedded webview window (`true`) or open in default system browser (`false`)|
 | `BUILDER_ENGINE`              | `pyinstaller`        | Compilation engine: `pyinstaller` (default) or `nuitka` (native C++ compilation)      |
 
 ---

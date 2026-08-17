@@ -59,6 +59,13 @@ def run() -> int:
                 logger.info("Application already running; focusing active instance and exiting.")
                 return 0
 
+        # External browser mode: open in system default browser directly
+        if not config.embedded_webview:
+            import webbrowser
+            logger.info("External browser mode: opening %s in default system browser", config.web_app_url)
+            webbrowser.open(config.web_app_url, new=2)
+            return 0
+
         # Auto-start synchronization
         try:
             from app.autostart import sync_autostart

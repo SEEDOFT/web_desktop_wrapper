@@ -375,6 +375,7 @@ def build() -> int:
         "run_on_startup": parse_bool(os.getenv("RUN_ON_STARTUP"), False),
         "allow_file_drop": parse_bool(os.getenv("ALLOW_FILE_DROP"), False),
         "wrapper_version": str(args.wrapper_version or "1.0.0").strip(),
+        "embedded_webview": parse_bool(os.getenv("EMBEDDED_WEBVIEW", os.getenv("EMBED_WEBVIEW", "true")), True),
     }
     original_content = EMBEDDED_CONFIG_PATH.read_text(encoding="utf-8")
     try:

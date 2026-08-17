@@ -100,6 +100,7 @@ class AppConfig:
     run_on_startup: bool
     allow_file_drop: bool
     wrapper_version: str = "1.0.0"
+    embedded_webview: bool = True
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -388,6 +389,18 @@ class AppConfig:
             )
         ).strip() or "1.0.0"
 
+        embedded_webview = parse_bool(
+            get_config_value(
+                "EMBEDDED_WEBVIEW",
+                embedded,
+                "embedded_webview",
+                os.getenv("EMBED_WEBVIEW", "true"),
+                is_frozen=is_frozen,
+            ),
+            default=True,
+            name="EMBEDDED_WEBVIEW",
+        )
+
         return cls(
             app_name=app_name,
             organization_name=organization_name,
@@ -425,6 +438,7 @@ class AppConfig:
             run_on_startup=run_on_startup,
             allow_file_drop=allow_file_drop,
             wrapper_version=wrapper_version,
+            embedded_webview=embedded_webview,
         )
 
     @staticmethod

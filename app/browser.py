@@ -1159,6 +1159,17 @@ def run_browser(config: AppConfig) -> int:
     window_events.initialized += (
         lambda renderer: _renderer_initialized(renderer, expected_renderer)
     )
+
+    if config.wrapper_version:
+        def _attach_request_version_header(request: Any) -> None:
+            try:
+                if hasattr(request, "headers") and isinstance(request.headers, dict):
+                    request.headers["X-Wrapper-Version"] = config.wrapper_version
+            except Exception as e:
+                logger.debug("Failed to set X-Wrapper-Version header in request_sent: %s", e)
+
+        window_events.request_sent += _attach_request_version_header
+
     if backend == "edgechromium":
         window_events.before_show += (
             lambda window: _configure_native_webview(window, config)

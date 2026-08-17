@@ -245,7 +245,11 @@ def main() -> int:
 
     print("\nCompiling combined offline installer...")
     subprocess.run(
-        [str(iscc), str(INSTALLER_ROOT / "DIGI Express Admin.iss")],
+        [
+            str(iscc),
+            f"/DAppVersion={args.wrapper_version}",
+            str(INSTALLER_ROOT / "DIGI Express Admin.iss"),
+        ],
         cwd=INSTALLER_ROOT,
         check=True,
     )

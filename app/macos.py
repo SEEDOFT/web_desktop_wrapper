@@ -142,6 +142,23 @@ def configure_macos_webview(window: Any, config: AppConfig) -> None:
     delegate = NavigationDelegate.alloc().initWithDelegate_(original_delegate)
     webview.setNavigationDelegate_(delegate)
 
+    if config.wrapper_version and hasattr(webview, "configuration"):
+        try:
+            from app.scripts_loader import get_script
+            header_script = get_script(
+                "wrapper_version_header.js",
+                WRAPPER_VERSION=config.wrapper_version,
+            )
+            if header_script:
+                user_script = WebKit.WKUserScript.alloc().initWithSource_injectionTime_forMainFrameOnly_(
+                    header_script,
+                    getattr(WebKit, "WKUserScriptInjectionTimeAtDocumentStart", 0),
+                    False,
+                )
+                webview.configuration().userContentController().addUserScript_(user_script)
+        except Exception as e:
+            logger.debug("Failed to inject X-Wrapper-Version script on macOS: %s", e)
+
     def shortcut_monitor(event: Any) -> Any:
         flags = event.modifierFlags()
         if not (flags & AppKit.NSEventModifierFlagCommand):

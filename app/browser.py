@@ -28,7 +28,7 @@ from app.constants import (
 )
 from app.logger import get_logger
 from app.navigation import is_navigation_allowed
-from app.platform import browser_backend, persistent_storage_path, renderer_name
+from app.platforms import browser_backend, persistent_storage_path, renderer_name
 
 logger = get_logger(__name__)
 
@@ -82,38 +82,15 @@ def _cleanup_native_handlers() -> None:
         _NATIVE_HANDLERS.clear()
     logger.debug("Native event handlers cleaned up")
 
-_SWIPE_NAVIGATION_SCRIPT = f"""
-(function () {{
-    if (window.__wdwSwipeNavigationInstalled) {{
-        return;
-    }}
-    window.__wdwSwipeNavigationInstalled = true;
-    var THRESHOLD = {SWIPE_THRESHOLD_PIXELS};
-    var COOLDOWN_MS = {SWIPE_COOLDOWN_MS};
-    var lastNavigationAt = 0;
-    function postDirection(direction) {{
-        var webview = window.chrome && window.chrome.webview;
-        if (webview && webview.postMessage) {{
-            webview.postMessage({{ type: "horizontalSwipe", direction: direction }});
-        }}
-    }}
-    function onWheel(event) {{
-        if (event.ctrlKey || event.shiftKey || event.altKey || event.metaKey) {{
-            return;
-        }}
-        if (Math.abs(event.deltaX) < THRESHOLD) {{
-            return;
-        }}
-        var now = Date.now();
-        if (now - lastNavigationAt < COOLDOWN_MS) {{
-            return;
-        }}
-        lastNavigationAt = now;
-        postDirection(event.deltaX > 0 ? "back" : "forward");
-    }}
-    window.addEventListener("wheel", onWheel, true);
-}})();
-"""
+from app.scripts_loader import get_script
+
+
+def _get_swipe_navigation_script() -> str:
+    return get_script(
+        "swipe_navigation.js",
+        THRESHOLD=SWIPE_THRESHOLD_PIXELS,
+        COOLDOWN_MS=SWIPE_COOLDOWN_MS,
+    )
 
 
 def _swipe_action_from_message(message_json: str | None) -> Literal["back", "forward"] | None:
@@ -551,9 +528,11 @@ def _attach_swipe_navigation(core: Any, invoke_on_ui_thread: Any) -> None:
             invoke_on_ui_thread(lambda: core.GoForward())
 
     try:
+        swipe_script = _get_swipe_navigation_script()
         core.WebMessageReceived += on_web_message
-        core.AddScriptToExecuteOnDocumentCreatedAsync(_SWIPE_NAVIGATION_SCRIPT)
-        core.ExecuteScriptAsync(_SWIPE_NAVIGATION_SCRIPT)
+        if swipe_script:
+            core.AddScriptToExecuteOnDocumentCreatedAsync(swipe_script)
+            core.ExecuteScriptAsync(swipe_script)
         _register_native_handler(on_web_message)
     except Exception as e:
         logger.warning("Failed to install swipe navigation: %s", e)
@@ -846,21 +825,41 @@ def _configure_native_webview(
             except Exception as e:
                 logger.debug("Failed to set custom User-Agent: %s", e)
 
+        # Attach X-Wrapper-Version header to all HTTP requests in WebView2
+        if config.wrapper_version and hasattr(core, "AddWebResourceRequestedFilter"):
+            try:
+                # 0 corresponds to CoreWebView2WebResourceContext.All
+                core.AddWebResourceRequestedFilter("*", 0)
+
+                def _on_web_resource_requested(sender: Any, args: Any) -> None:
+                    del sender
+                    try:
+                        args.Request.Headers.SetHeader("X-Wrapper-Version", config.wrapper_version)
+                    except Exception:
+                        pass
+
+                core.WebResourceRequested += _on_web_resource_requested
+            except Exception as e:
+                logger.debug("Failed to attach WebResourceRequested filter: %s", e)
+
+        # Inject X-Wrapper-Version into client-side fetch and XMLHttpRequest
+        if config.wrapper_version and hasattr(core, "AddScriptToExecuteOnDocumentCreatedAsync"):
+            try:
+                header_script = get_script(
+                    "wrapper_version_header.js",
+                    WRAPPER_VERSION=config.wrapper_version,
+                )
+                if header_script:
+                    core.AddScriptToExecuteOnDocumentCreatedAsync(header_script)
+            except Exception as e:
+                logger.debug("Failed to attach X-Wrapper-Version user script: %s", e)
+
         # Drag-and-drop hardening (prevent accidental file drops from navigating away)
         if not config.allow_file_drop and hasattr(core, "AddScriptToExecuteOnDocumentCreatedAsync"):
             try:
-                core.AddScriptToExecuteOnDocumentCreatedAsync(
-                    """window.addEventListener('dragover', function(e) {
-                        if (!e.target.closest('input[type=file], .dropzone, [data-dropzone]')) {
-                            e.preventDefault();
-                        }
-                    }, false);
-                    window.addEventListener('drop', function(e) {
-                        if (!e.target.closest('input[type=file], .dropzone, [data-dropzone]')) {
-                            e.preventDefault();
-                        }
-                    }, false);"""
-                )
+                drop_script = get_script("prevent_file_drop.js")
+                if drop_script:
+                    core.AddScriptToExecuteOnDocumentCreatedAsync(drop_script)
             except Exception as e:
                 logger.debug("Failed to attach drag-drop hardening script: %s", e)
 

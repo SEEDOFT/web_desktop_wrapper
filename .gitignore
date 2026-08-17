@@ -16,3 +16,4 @@ macos/output/
 macos/staging/
 assets/*.icns
 .DS_Store
+nuitka-crash-report.xml

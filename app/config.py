@@ -24,7 +24,15 @@ from app.config_validators import (
 
 
 def _is_frozen() -> bool:
-    return bool(getattr(sys, "frozen", False))
+    has_embedded = bool(getattr(embedded_config, "CONFIG", None))
+    return bool(
+        getattr(sys, "frozen", False)
+        or hasattr(sys, "__nuitka_version__")
+        or hasattr(sys, "nuitka_version")
+        or "__compiled__" in globals()
+        or "__compiled__" in sys.modules
+        or has_embedded
+    )
 
 
 def _load_development_environment() -> None:
@@ -91,6 +99,7 @@ class AppConfig:
     browser_locale: str
     run_on_startup: bool
     allow_file_drop: bool
+    wrapper_version: str = "1.0.0"
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -369,6 +378,16 @@ class AppConfig:
             name="PAGE_BACKGROUND_COLOR",
         )
 
+        wrapper_version = str(
+            get_config_value(
+                "APP_WRAPPER_VERSION",
+                embedded,
+                "wrapper_version",
+                os.getenv("WRAPPER_VERSION", "1.0.0"),
+                is_frozen=is_frozen,
+            )
+        ).strip() or "1.0.0"
+
         return cls(
             app_name=app_name,
             organization_name=organization_name,
@@ -405,6 +424,7 @@ class AppConfig:
             browser_locale=browser_locale,
             run_on_startup=run_on_startup,
             allow_file_drop=allow_file_drop,
+            wrapper_version=wrapper_version,
         )
 
     @staticmethod

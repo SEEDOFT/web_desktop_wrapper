@@ -144,6 +144,7 @@ def embedded_payload() -> dict[str, object]:
         "browser_locale": config.browser_locale,
         "run_on_startup": config.run_on_startup,
         "allow_file_drop": config.allow_file_drop,
+        "wrapper_version": config.wrapper_version,
     }
 
 
@@ -286,11 +287,11 @@ def main() -> int:
                 str(PROJECT_ROOT),
                 "--hidden-import",
                 "webview.platforms.cocoa",
-                "--collect-all",
-                "webview",
                 "--add-data",
                 f"{PROJECT_ROOT / 'assets'}:assets",
-                str(PROJECT_ROOT / "app" / "__main__.py"),
+                "--add-data",
+                f"{PROJECT_ROOT / 'app' / 'scripts'}:app/scripts",
+                str(PROJECT_ROOT / "run.py"),
             ],
             environment=environment,
         )

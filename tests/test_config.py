@@ -102,6 +102,26 @@ class AppConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 AppConfig.load()
 
+    def test_wrapper_version_default_and_custom(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"WEB_APP_URL": "https://portal.example.test"},
+            clear=True,
+        ):
+            config = AppConfig.load()
+            self.assertEqual(config.wrapper_version, "1.0.0")
+
+        with patch.dict(
+            os.environ,
+            {
+                "WEB_APP_URL": "https://portal.example.test",
+                "APP_WRAPPER_VERSION": "2.4.0",
+            },
+            clear=True,
+        ):
+            config = AppConfig.load()
+            self.assertEqual(config.wrapper_version, "2.4.0")
+
 
 if __name__ == "__main__":
     unittest.main()

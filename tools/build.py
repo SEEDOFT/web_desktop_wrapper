@@ -90,6 +90,22 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Optional platform-compatible application icon.",
     )
+    parser.add_argument(
+        "--builder",
+        choices=["pyinstaller", "nuitka"],
+        default=os.getenv("BUILDER_ENGINE", "pyinstaller").lower(),
+        help="Compilation engine: pyinstaller (default) or nuitka (native C++ compilation).",
+    )
+    parser.add_argument(
+        "--wrapper-version",
+        default=os.getenv("APP_WRAPPER_VERSION", os.getenv("WRAPPER_VERSION", "1.0.0")),
+        help="Desktop wrapper version sent in the 'X-Wrapper-Version' request header (default: 1.0.0).",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Keep console window enabled to view stdout/stderr and tracebacks.",
+    )
     return parser.parse_args()
 
 
@@ -300,13 +316,23 @@ def build() -> int:
             return 2
         icon_path = None
 
-    if importlib.util.find_spec("PyInstaller") is None:
-        print(
-            "PyInstaller is not installed. Run: "
-            "python -m pip install -r requirements.txt",
-            file=sys.stderr,
-        )
-        return 3
+    builder_engine = args.builder.lower()
+    if builder_engine == "pyinstaller":
+        if importlib.util.find_spec("PyInstaller") is None:
+            print(
+                "PyInstaller is not installed. Run: "
+                "python -m pip install -r requirements.txt",
+                file=sys.stderr,
+            )
+            return 3
+    elif builder_engine == "nuitka":
+        if importlib.util.find_spec("nuitka") is None and shutil.which("nuitka") is None:
+            print(
+                "Nuitka is not installed. Run: "
+                "python -m pip install nuitka zstandard",
+                file=sys.stderr,
+            )
+            return 3
 
     env_hosts = [
         host.strip().lower().rstrip(".")
@@ -348,59 +374,106 @@ def build() -> int:
         "browser_locale": os.getenv("BROWSER_LOCALE", "").strip(),
         "run_on_startup": parse_bool(os.getenv("RUN_ON_STARTUP"), False),
         "allow_file_drop": parse_bool(os.getenv("ALLOW_FILE_DROP"), False),
+        "wrapper_version": str(args.wrapper_version or "1.0.0").strip(),
     }
     original_content = EMBEDDED_CONFIG_PATH.read_text(encoding="utf-8")
     try:
         write_embedded_config(payload)
 
-        command = [
-            sys.executable,
-            "-m",
-            "PyInstaller",
-            "--noconfirm",
-            "--clean",
-            "--windowed",
-            "--noupx",
-            "--optimize",
-            "2",
-            "--name",
-            executable_name,
-            "--paths",
-            str(PROJECT_ROOT),
-            "--hidden-import",
-            "webview.platforms.edgechromium",
-            "--hidden-import",
-            "clr",
-            "--hidden-import",
-            "pythonnet",
-            "--hidden-import",
-            "clr_loader",
-            "--collect-all",
-            "webview",
-            "--add-data",
-            "assets;assets",
-            "--exclude-module",
-            "PySide6",
-            "--exclude-module",
-            "PyQt6",
-            "--exclude-module",
-            "PyQt5",
-            "--exclude-module",
-            "cefpython3",
-            "--exclude-module",
-            "gi",
-            "--exclude-module",
-            "kivy",
-            "--onedir" if args.onedir else "--onefile",
-        ]
+        if builder_engine == "nuitka":
+            command = [
+                sys.executable,
+                "-m",
+                "nuitka",
+                "--standalone",
+                "--assume-yes-for-downloads",
+                "--show-progress",
+                "--remove-output",
+                "--disable-plugin=pywebview",
+                "--enable-plugin=no-qt",
+                "--no-deployment-flag=excluded-module-usage",
+                f"--output-dir={PROJECT_ROOT / 'dist'}",
+                f"--output-filename={executable_name}.exe" if sys.platform == "win32" else f"--output-filename={executable_name}",
+                "--include-package=app",
+                "--include-package=dotenv",
+                "--include-package=webview",
+                f"--include-data-dir={PROJECT_ROOT / 'assets'}=assets",
+                f"--include-data-dir={PROJECT_ROOT / 'app' / 'scripts'}=app/scripts",
+            ]
+            if sys.platform == "win32":
+                command.extend([
+                    "--include-module=webview.platforms.winforms",
+                    "--include-module=webview.platforms.edgechromium",
+                    "--include-module=webview.platforms.win32",
+                    "--include-package=clr_loader",
+                    "--include-package=pythonnet",
+                    f"--windows-console-mode={'force' if args.debug else 'disable'}",
+                ])
+                if icon_path is not None:
+                    command.append(f"--windows-icon-from-ico={icon_path.resolve()}")
+            elif sys.platform == "darwin":
+                command.extend([
+                    "--include-module=webview.platforms.cocoa",
+                ])
+                command.append("--macos-create-app-bundle")
+                if icon_path is not None:
+                    command.append(f"--macos-app-icon={icon_path.resolve()}")
 
-        if icon_path is not None:
-            command.extend(["--icon", str(icon_path.resolve())])
+            if not args.onedir:
+                command.append("--onefile")
 
-        command.append(str(PROJECT_ROOT / "app" / "__main__.py"))
+            command.append(str(PROJECT_ROOT / "run.py"))
+        else:
+            command = [
+                sys.executable,
+                "-m",
+                "PyInstaller",
+                "--noconfirm",
+                "--clean",
+                "--console" if args.debug else "--windowed",
+                "--noupx",
+                "--optimize",
+                "2",
+                "--name",
+                executable_name,
+                "--paths",
+                str(PROJECT_ROOT),
+                "--hidden-import",
+                "webview.platforms.edgechromium",
+                "--hidden-import",
+                "clr",
+                "--hidden-import",
+                "pythonnet",
+                "--hidden-import",
+                "clr_loader",
+                "--collect-all",
+                "webview",
+                "--add-data",
+                "assets;assets" if sys.platform == "win32" else "assets:assets",
+                "--add-data",
+                "app/scripts;app/scripts" if sys.platform == "win32" else "app/scripts:app/scripts",
+                "--exclude-module",
+                "PySide6",
+                "--exclude-module",
+                "PyQt6",
+                "--exclude-module",
+                "PyQt5",
+                "--exclude-module",
+                "cefpython3",
+                "--exclude-module",
+                "gi",
+                "--exclude-module",
+                "kivy",
+                "--onedir" if args.onedir else "--onefile",
+            ]
+
+            if icon_path is not None:
+                command.extend(["--icon", str(icon_path.resolve())])
+
+            command.append(str(PROJECT_ROOT / "run.py"))
 
         remove_previous_output(executable_name, args.onedir)
-        print("Building application...")
+        print(f"Building application with {builder_engine.capitalize()}...")
         subprocess.run(command, cwd=PROJECT_ROOT, check=True)
     except subprocess.CalledProcessError as exc:
         print(f"Build failed with exit code {exc.returncode}.", file=sys.stderr)

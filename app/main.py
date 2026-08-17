@@ -7,7 +7,7 @@ import sys
 from app.browser import run_browser
 from app.config import AppConfig, ConfigError
 from app.logger import get_logger
-from app.platform import runtime_check_required
+from app.platforms import runtime_check_required
 from app.runtime import find_webview2_runtime
 from app.single_instance import acquire_single_instance
 
@@ -45,38 +45,45 @@ def run() -> int:
         return 3
 
     try:
-        config = AppConfig.load()
-    except ConfigError as exc:
-        _message_box("Configuration error", str(exc))
-        return 2
+        try:
+            config = AppConfig.load()
+        except ConfigError as exc:
+            _message_box("Configuration error", str(exc))
+            return 2
 
-    # Single-instance enforcement
-    lock = None
-    if config.single_instance:
-        lock = acquire_single_instance(config.profile_name, config.app_name)
-        if lock is None:
-            logger.info("Application already running; focusing active instance and exiting.")
-            return 0
+        # Single-instance enforcement
+        lock = None
+        if config.single_instance:
+            lock = acquire_single_instance(config.profile_name, config.app_name)
+            if lock is None:
+                logger.info("Application already running; focusing active instance and exiting.")
+                return 0
 
-    # Auto-start synchronization
-    try:
-        from app.autostart import sync_autostart
-        sync_autostart(config.app_name, config.organization_name, config.run_on_startup)
-    except Exception as e:
-        logger.debug("Failed to sync autostart: %s", e)
+        # Auto-start synchronization
+        try:
+            from app.autostart import sync_autostart
+            sync_autostart(config.app_name, config.organization_name, config.run_on_startup)
+        except Exception as e:
+            logger.debug("Failed to sync autostart: %s", e)
 
-    try:
-        if runtime_check_required():
-            runtime = find_webview2_runtime()
-            if not runtime.available:
-                _message_box(
-                    config.app_name,
-                    "Microsoft Edge WebView2 Runtime is required. "
-                    "Install the Evergreen WebView2 Runtime, then reopen the application.",
-                )
-                return 3
+        try:
+            if runtime_check_required():
+                runtime = find_webview2_runtime()
+                if not runtime.available:
+                    _message_box(
+                        config.app_name,
+                        "Microsoft Edge WebView2 Runtime is required. "
+                        "Install the Evergreen WebView2 Runtime, then reopen the application.",
+                    )
+                    return 3
 
-        return run_browser(config)
-    finally:
-        if lock:
-            lock.release()
+            return run_browser(config)
+        finally:
+            if lock:
+                lock.release()
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        logger.critical("Fatal application error:\n%s", tb)
+        _message_box("Application Error", f"An unexpected error occurred:\n\n{exc}\n\n{tb}")
+        return 1

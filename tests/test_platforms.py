@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from app.platform import (
+from app.platforms import (
     browser_backend,
     persistent_storage_path,
     renderer_name,

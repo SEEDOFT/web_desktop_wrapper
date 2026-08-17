@@ -133,6 +133,17 @@ def embedded_payload() -> dict[str, object]:
         "allow_downloads": config.allow_downloads,
         "page_background_color": config.page_background_color,
         "app_icon": "assets/digi_express.icns",
+        "single_instance": config.single_instance,
+        "show_splash": config.show_splash,
+        "splash_duration": config.splash_duration,
+        "enable_tray": config.enable_tray,
+        "minimize_to_tray": config.minimize_to_tray,
+        "default_downloads_path": config.default_downloads_path,
+        "show_download_notifications": config.show_download_notifications,
+        "user_agent": config.user_agent,
+        "browser_locale": config.browser_locale,
+        "run_on_startup": config.run_on_startup,
+        "allow_file_drop": config.allow_file_drop,
     }
 
 
@@ -176,28 +187,70 @@ def configure_bundle() -> None:
         plistlib.dump(plist, handle)
 
 
+def remove_quarantine(path: Path) -> None:
+    """Remove macOS quarantine and extended attributes from a file or bundle.
+    
+    The quarantine attribute (com.apple.quarantine) is set by Gatekeeper when a file
+    is downloaded from the internet or created from untrusted sources. Removing it
+    along with Finder detritus ensures the app bundle, ZIP, and DMG open cleanly without
+    Gatekeeper blockers or codesign detritus errors.
+    
+    Args:
+        path: File or directory bundle to remove quarantine from.
+    """
+    if not path.exists():
+        return
+
+    is_dir = path.is_dir()
+    target_desc = f"app bundle: {path.name}" if is_dir else path.name
+    print(f"Removing quarantine attribute from {target_desc}")
+
+    # Remove com.apple.quarantine attribute specifically
+    quarantine_args = ["xattr", "-r", "-d", "com.apple.quarantine", str(path)] if is_dir else ["xattr", "-d", "com.apple.quarantine", str(path)]
+    run(quarantine_args, check=False)
+
+    # Clear all extended attributes (detritus, FinderInfo, etc.)
+    clear_args = ["xattr", "-c", "-r", str(path)] if is_dir else ["xattr", "-c", str(path)]
+    result = run(clear_args, check=False)
+
+    if result.returncode == 0:
+        print(f"[OK] Quarantine and extended attributes removed from {path.name}")
+    else:
+        # Check if com.apple.quarantine is still present
+        check_result = run(["xattr", "-p", "com.apple.quarantine", str(path)], check=False)
+        if check_result.returncode != 0:
+            print(f"[OK] No quarantine attribute found on {path.name} (already clean)")
+        else:
+            print(f"[WARN] Notice: Could not remove all attributes on {path.name}: {result.stderr.strip() or 'unknown'}")
+
+
 def sign_bundle(path: Path) -> None:
+    remove_quarantine(path)
     run(["codesign", "--force", "--deep", "--sign", "-", "--options", "runtime", str(path)])
-    result = run(["xattr", "-d", "com.apple.quarantine", str(path)], check=False)
-    if result.returncode not in (0, 1):
-        raise SystemExit(
-            f"Failed to clear quarantine flag for {path}: {result.stderr.strip() or result.stdout.strip() or 'unknown error'}"
-        )
+    remove_quarantine(path)
 
 
 def create_distribution(skip_dmg: bool) -> None:
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    print("Creating distribution packages:")
+    print(f"Creating ZIP archive: {ZIP_PATH.name}")
     run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(APP_PATH), str(ZIP_PATH)])
+    remove_quarantine(ZIP_PATH)
     write_checksum(ZIP_PATH)
     if skip_dmg:
         return
 
     staging = MACOS_ROOT / "staging" / "dmg"
     staging.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(APP_PATH, staging / APP_PATH.name)
+    staged_app = staging / APP_PATH.name
+    shutil.copytree(APP_PATH, staged_app)
+    remove_quarantine(staged_app)
     (staging / "Applications").symlink_to("/Applications")
+    print(f"Creating DMG: {DMG_PATH.name}")
     run(["hdiutil", "create", "-volname", APP_NAME, "-srcfolder", str(staging), "-ov", "-format", "UDZO", str(DMG_PATH)])
+    print("Code signing and quarantine removal:")
     sign_bundle(DMG_PATH)
+    print()
     write_checksum(DMG_PATH)
 
 
@@ -245,7 +298,9 @@ def main() -> int:
         EMBEDDED_CONFIG_PATH.write_text(original_content, encoding="utf-8")
 
     configure_bundle()
+    print(f"\nCode signing and quarantine removal:")
     sign_bundle(APP_PATH)
+    print()
     run(["lipo", "-info", str(APP_PATH / "Contents" / "MacOS" / APP_NAME)])
     create_distribution(args.skip_dmg)
     print(f"Build complete: {DMG_PATH if not args.skip_dmg else ZIP_PATH}")

@@ -49,6 +49,13 @@ class ErrorPageContentTests(unittest.TestCase):
         self.assertNotIn("https://", html)
         self.assertNotIn("login", html)
 
+    def test_error_page_contains_retry_button_and_shortcut_hint(self) -> None:
+        html = _navigation_error_html(self._config())
+        self.assertIn("Retry Connection", html)
+        self.assertIn("retryConnection", html)
+        self.assertIn("Ctrl+R", html)
+        self.assertIn("F5", html)
+
 
 if __name__ == "__main__":
     unittest.main()

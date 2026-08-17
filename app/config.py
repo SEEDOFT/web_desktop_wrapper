@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,10 +10,17 @@ from urllib.parse import ParseResult, urlparse
 from dotenv import load_dotenv
 
 from app import embedded_config
-
-
-class ConfigError(ValueError):
-    """Raised when application configuration is missing, altered, or invalid."""
+from app.config_validators import (
+    ConfigError,
+    get_config_value,
+    normalize_host,
+    normalize_web_app_url,
+    parse_bool,
+    parse_hex_color,
+    parse_int,
+    parse_url_list,
+    slugify,
+)
 
 
 def _is_frozen() -> bool:
@@ -56,91 +62,6 @@ def _embedded_config() -> dict[str, Any]:
     return {}
 
 
-def _normalize_web_app_url(url: str) -> str:
-    normalized = url.strip()
-
-    local_without_scheme = re.fullmatch(
-        r"(?P<host>localhost|127\.0\.0\.1|\[::1\])"
-        r"(?P<port>:\d{1,5})?"
-        r"(?P<path>/.*)?",
-        normalized,
-        flags=re.IGNORECASE,
-    )
-    if local_without_scheme:
-        normalized = f"http://{normalized}"
-
-    return normalized
-
-
-def _normalize_host(host: str) -> str:
-    return host.strip().lower().rstrip(".")
-
-
-def _slugify(value: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", value.strip()).strip("-")
-    return slug or "web-desktop"
-
-
-def _parse_bool(value: Any, default: bool, name: str) -> bool:
-    if value is None or value == "":
-        return default
-    if isinstance(value, bool):
-        return value
-
-    normalized = str(value).strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-
-    raise ConfigError(
-        f"{name} must be one of: true, false, 1, 0, yes, no, on, off."
-    )
-
-
-def _parse_int(
-    value: Any,
-    default: int,
-    minimum: int,
-    maximum: int,
-    name: str,
-) -> int:
-    if value is None or value == "":
-        return default
-
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ConfigError(f"{name} must be an integer.") from exc
-
-    if not minimum <= parsed <= maximum:
-        raise ConfigError(f"{name} must be between {minimum} and {maximum}.")
-    return parsed
-
-
-
-def _parse_hex_color(value: Any, default: str, name: str) -> str:
-    normalized = str(value or default).strip()
-    if not re.fullmatch(r"#[0-9a-fA-F]{6}", normalized):
-        raise ConfigError(f"{name} must use the #RRGGBB format.")
-    return normalized.lower()
-
-
-def _environment_or_embedded(
-    environment_name: str,
-    embedded: dict[str, Any],
-    embedded_name: str,
-    default: Any = None,
-) -> Any:
-    if _is_frozen():
-        return embedded.get(embedded_name, default)
-
-    environment_value = os.getenv(environment_name)
-    if environment_value is not None:
-        return environment_value
-    return embedded.get(embedded_name, default)
-
-
 @dataclass(frozen=True, slots=True)
 class AppConfig:
     app_name: str
@@ -159,158 +80,294 @@ class AppConfig:
     production_mode: bool
     page_background_color: str
     app_icon: str
+    single_instance: bool
+    show_splash: bool
+    splash_duration: float
+    enable_tray: bool
+    minimize_to_tray: bool
+    default_downloads_path: str
+    show_download_notifications: bool
+    user_agent: str
+    browser_locale: str
+    run_on_startup: bool
+    allow_file_drop: bool
 
     @classmethod
     def load(cls) -> "AppConfig":
         embedded = _embedded_config()
+        is_frozen = _is_frozen()
 
         app_name = str(
-            _environment_or_embedded(
+            get_config_value(
                 "APP_NAME",
                 embedded,
                 "app_name",
                 "Web Desktop",
+                is_frozen=is_frozen,
             )
         ).strip() or "Web Desktop"
 
         organization_name = str(
-            _environment_or_embedded(
+            get_config_value(
                 "APP_ORGANIZATION",
                 embedded,
                 "organization_name",
                 "WebDesktop",
+                is_frozen=is_frozen,
             )
         ).strip() or "WebDesktop"
 
-        web_app_url = _normalize_web_app_url(
+        web_app_url = normalize_web_app_url(
             str(
-                _environment_or_embedded(
+                get_config_value(
                     "WEB_APP_URL",
                     embedded,
                     "web_app_url",
                     "",
+                    is_frozen=is_frozen,
                 )
             )
         )
 
-        allow_insecure_http = _parse_bool(
-            _environment_or_embedded(
+        allow_insecure_http = parse_bool(
+            get_config_value(
                 "ALLOW_INSECURE_HTTP",
                 embedded,
                 "allow_insecure_http",
                 False,
+                is_frozen=is_frozen,
             ),
-            False,
-            "ALLOW_INSECURE_HTTP",
+            default=False,
+            name="ALLOW_INSECURE_HTTP",
         )
         parsed = cls._validate_web_url(web_app_url, allow_insecure_http)
 
-        raw_hosts = _environment_or_embedded(
+        raw_hosts = get_config_value(
             "WEB_APP_ALLOWED_HOSTS",
             embedded,
             "allowed_hosts",
             [],
+            is_frozen=is_frozen,
         )
-        if isinstance(raw_hosts, str):
-            requested_hosts = raw_hosts.split(",")
-        elif isinstance(raw_hosts, list):
-            requested_hosts = raw_hosts
-        else:
-            requested_hosts = []
+        requested_hosts = parse_url_list(raw_hosts)
 
         normalized_hosts = {
-            _normalize_host(str(host))
+            normalize_host(str(host))
             for host in requested_hosts
-            if _normalize_host(str(host))
+            if normalize_host(str(host))
         }
-        normalized_hosts.add(_normalize_host(parsed.hostname or ""))
+        normalized_hosts.add(normalize_host(parsed.hostname or ""))
 
-        allow_subdomains = _parse_bool(
-            _environment_or_embedded(
+        allow_subdomains = parse_bool(
+            get_config_value(
                 "ALLOW_SUBDOMAINS",
                 embedded,
                 "allow_subdomains",
                 False,
+                is_frozen=is_frozen,
             ),
-            False,
-            "ALLOW_SUBDOMAINS",
+            default=False,
+            name="ALLOW_SUBDOMAINS",
         )
-        open_external_links = _parse_bool(
-            _environment_or_embedded(
+        open_external_links = parse_bool(
+            get_config_value(
                 "OPEN_EXTERNAL_LINKS",
                 embedded,
                 "open_external_links",
                 False,
+                is_frozen=is_frozen,
             ),
-            False,
-            "OPEN_EXTERNAL_LINKS",
+            default=False,
+            name="OPEN_EXTERNAL_LINKS",
         )
-        start_maximized = _parse_bool(
-            _environment_or_embedded(
+        start_maximized = parse_bool(
+            get_config_value(
                 "START_MAXIMIZED",
                 embedded,
                 "start_maximized",
                 True,
+                is_frozen=is_frozen,
             ),
-            True,
-            "START_MAXIMIZED",
+            default=True,
+            name="START_MAXIMIZED",
         )
-        persist_session = _parse_bool(
-            _environment_or_embedded(
+        persist_session = parse_bool(
+            get_config_value(
                 "PERSIST_SESSION",
                 embedded,
                 "persist_session",
                 False,
+                is_frozen=is_frozen,
             ),
-            False,
-            "PERSIST_SESSION",
+            default=False,
+            name="PERSIST_SESSION",
         )
-        allow_downloads = _parse_bool(
-            _environment_or_embedded(
+        allow_downloads = parse_bool(
+            get_config_value(
                 "ALLOW_DOWNLOADS",
                 embedded,
                 "allow_downloads",
                 False,
+                is_frozen=is_frozen,
             ),
-            False,
-            "ALLOW_DOWNLOADS",
+            default=False,
+            name="ALLOW_DOWNLOADS",
+        )
+        single_instance = parse_bool(
+            get_config_value(
+                "SINGLE_INSTANCE",
+                embedded,
+                "single_instance",
+                True,
+                is_frozen=is_frozen,
+            ),
+            default=True,
+            name="SINGLE_INSTANCE",
+        )
+        show_splash = parse_bool(
+            get_config_value(
+                "SHOW_SPLASH",
+                embedded,
+                "show_splash",
+                True,
+                is_frozen=is_frozen,
+            ),
+            default=True,
+            name="SHOW_SPLASH",
         )
 
-        width = _parse_int(
-            _environment_or_embedded(
+        try:
+            raw_duration = get_config_value(
+                "SPLASH_DURATION",
+                embedded,
+                "splash_duration",
+                4.5,
+                is_frozen=is_frozen,
+            )
+            splash_duration = float(raw_duration)
+        except (TypeError, ValueError):
+            splash_duration = 4.5
+
+        enable_tray = parse_bool(
+            get_config_value(
+                "ENABLE_SYSTEM_TRAY",
+                embedded,
+                "enable_tray",
+                True,
+                is_frozen=is_frozen,
+            ),
+            default=True,
+            name="ENABLE_SYSTEM_TRAY",
+        )
+        minimize_to_tray = parse_bool(
+            get_config_value(
+                "MINIMIZE_TO_TRAY",
+                embedded,
+                "minimize_to_tray",
+                False,
+                is_frozen=is_frozen,
+            ),
+            default=False,
+            name="MINIMIZE_TO_TRAY",
+        )
+        default_downloads_path = str(
+            get_config_value(
+                "DEFAULT_DOWNLOADS_PATH",
+                embedded,
+                "default_downloads_path",
+                "",
+                is_frozen=is_frozen,
+            )
+        ).strip()
+        show_download_notifications = parse_bool(
+            get_config_value(
+                "SHOW_DOWNLOAD_NOTIFICATIONS",
+                embedded,
+                "show_download_notifications",
+                True,
+                is_frozen=is_frozen,
+            ),
+            default=True,
+            name="SHOW_DOWNLOAD_NOTIFICATIONS",
+        )
+        user_agent = str(
+            get_config_value(
+                "USER_AGENT",
+                embedded,
+                "user_agent",
+                "",
+                is_frozen=is_frozen,
+            )
+        ).strip()
+        browser_locale = str(
+            get_config_value(
+                "BROWSER_LOCALE",
+                embedded,
+                "browser_locale",
+                "",
+                is_frozen=is_frozen,
+            )
+        ).strip()
+        run_on_startup = parse_bool(
+            get_config_value(
+                "RUN_ON_STARTUP",
+                embedded,
+                "run_on_startup",
+                False,
+                is_frozen=is_frozen,
+            ),
+            default=False,
+            name="RUN_ON_STARTUP",
+        )
+        allow_file_drop = parse_bool(
+            get_config_value(
+                "ALLOW_FILE_DROP",
+                embedded,
+                "allow_file_drop",
+                False,
+                is_frozen=is_frozen,
+            ),
+            default=False,
+            name="ALLOW_FILE_DROP",
+        )
+
+        width = parse_int(
+            get_config_value(
                 "WINDOW_WIDTH",
                 embedded,
                 "window_width",
                 1280,
+                is_frozen=is_frozen,
             ),
-            1280,
-            800,
-            7680,
-            "WINDOW_WIDTH",
+            default=1280,
+            minimum=800,
+            maximum=7680,
+            name="WINDOW_WIDTH",
         )
-        height = _parse_int(
-            _environment_or_embedded(
+        height = parse_int(
+            get_config_value(
                 "WINDOW_HEIGHT",
                 embedded,
                 "window_height",
                 800,
+                is_frozen=is_frozen,
             ),
-            800,
-            600,
-            4320,
-            "WINDOW_HEIGHT",
+            default=800,
+            minimum=600,
+            maximum=4320,
+            name="WINDOW_HEIGHT",
         )
-        page_background_color = _parse_hex_color(
-            _environment_or_embedded(
+        page_background_color = parse_hex_color(
+            get_config_value(
                 "PAGE_BACKGROUND_COLOR",
                 embedded,
                 "page_background_color",
                 "#ffffff",
+                is_frozen=is_frozen,
             ),
-            "#ffffff",
-            "PAGE_BACKGROUND_COLOR",
+            default="#ffffff",
+            name="PAGE_BACKGROUND_COLOR",
         )
-
 
         return cls(
             app_name=app_name,
@@ -323,19 +380,31 @@ class AppConfig:
             start_maximized=start_maximized,
             window_width=width,
             window_height=height,
-            profile_name=_slugify(f"{organization_name}-{app_name}"),
+            profile_name=slugify(f"{organization_name}-{app_name}"),
             persist_session=persist_session,
             allow_downloads=allow_downloads,
-            production_mode=_is_frozen(),
+            production_mode=is_frozen,
             page_background_color=page_background_color,
             app_icon=str(
-                _environment_or_embedded(
+                get_config_value(
                     "APP_ICON",
                     embedded,
                     "app_icon",
                     "assets/digi_express.ico",
+                    is_frozen=is_frozen,
                 )
             ).strip() or "assets/digi_express.ico",
+            single_instance=single_instance,
+            show_splash=show_splash,
+            splash_duration=splash_duration,
+            enable_tray=enable_tray,
+            minimize_to_tray=minimize_to_tray,
+            default_downloads_path=default_downloads_path,
+            show_download_notifications=show_download_notifications,
+            user_agent=user_agent,
+            browser_locale=browser_locale,
+            run_on_startup=run_on_startup,
+            allow_file_drop=allow_file_drop,
         )
 
     @staticmethod
@@ -355,14 +424,14 @@ class AppConfig:
             raise ConfigError("Credentials must not be embedded in the web application URL.")
 
         localhost_hosts = {"localhost", "127.0.0.1", "::1"}
-        is_localhost = _normalize_host(parsed.hostname) in localhost_hosts
+        is_localhost = normalize_host(parsed.hostname) in localhost_hosts
         if parsed.scheme != "https" and not is_localhost and not allow_insecure_http:
             raise ConfigError("Remote web applications must use HTTPS.")
 
         return parsed
 
     def is_host_allowed(self, host: str) -> bool:
-        normalized = _normalize_host(host)
+        normalized = normalize_host(host)
         if not normalized:
             return False
 

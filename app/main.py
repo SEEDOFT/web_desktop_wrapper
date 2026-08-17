@@ -6,8 +6,12 @@ import sys
 
 from app.browser import run_browser
 from app.config import AppConfig, ConfigError
-from app.runtime import find_webview2_runtime
+from app.logger import get_logger
 from app.platform import runtime_check_required
+from app.runtime import find_webview2_runtime
+from app.single_instance import acquire_single_instance
+
+logger = get_logger(__name__)
 
 _IS_WINDOWS = os.name == "nt"
 _IS_MACOS = sys.platform == "darwin"
@@ -46,14 +50,33 @@ def run() -> int:
         _message_box("Configuration error", str(exc))
         return 2
 
-    if runtime_check_required():
-        runtime = find_webview2_runtime()
-        if not runtime.available:
-            _message_box(
-                config.app_name,
-                "Microsoft Edge WebView2 Runtime is required. "
-                "Install the Evergreen WebView2 Runtime, then reopen the application.",
-            )
-            return 3
+    # Single-instance enforcement
+    lock = None
+    if config.single_instance:
+        lock = acquire_single_instance(config.profile_name, config.app_name)
+        if lock is None:
+            logger.info("Application already running; focusing active instance and exiting.")
+            return 0
 
-    return run_browser(config)
+    # Auto-start synchronization
+    try:
+        from app.autostart import sync_autostart
+        sync_autostart(config.app_name, config.organization_name, config.run_on_startup)
+    except Exception as e:
+        logger.debug("Failed to sync autostart: %s", e)
+
+    try:
+        if runtime_check_required():
+            runtime = find_webview2_runtime()
+            if not runtime.available:
+                _message_box(
+                    config.app_name,
+                    "Microsoft Edge WebView2 Runtime is required. "
+                    "Install the Evergreen WebView2 Runtime, then reopen the application.",
+                )
+                return 3
+
+        return run_browser(config)
+    finally:
+        if lock:
+            lock.release()

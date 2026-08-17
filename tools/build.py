@@ -337,6 +337,17 @@ def build() -> int:
         "persist_session": persist_session,
         "allow_downloads": allow_downloads,
         "page_background_color": page_background_color,
+        "single_instance": parse_bool(os.getenv("SINGLE_INSTANCE"), True),
+        "show_splash": parse_bool(os.getenv("SHOW_SPLASH"), True),
+        "splash_duration": float(os.getenv("SPLASH_DURATION", "4.5")),
+        "enable_tray": parse_bool(os.getenv("ENABLE_SYSTEM_TRAY"), True),
+        "minimize_to_tray": parse_bool(os.getenv("MINIMIZE_TO_TRAY"), False),
+        "default_downloads_path": os.getenv("DEFAULT_DOWNLOADS_PATH", "").strip(),
+        "show_download_notifications": parse_bool(os.getenv("SHOW_DOWNLOAD_NOTIFICATIONS"), True),
+        "user_agent": os.getenv("USER_AGENT", "").strip(),
+        "browser_locale": os.getenv("BROWSER_LOCALE", "").strip(),
+        "run_on_startup": parse_bool(os.getenv("RUN_ON_STARTUP"), False),
+        "allow_file_drop": parse_bool(os.getenv("ALLOW_FILE_DROP"), False),
     }
     original_content = EMBEDDED_CONFIG_PATH.read_text(encoding="utf-8")
     try:

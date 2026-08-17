@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Literal
+
+BrowserBackend = Literal["edgechromium", "cocoa"]
+BrowserRenderer = Literal["edgechromium", "wkwebview"]
 
 
 def platform_name(value: str | None = None) -> str:
     return value or sys.platform
 
 
-def browser_backend(value: str | None = None) -> str:
+def browser_backend(value: str | None = None) -> BrowserBackend:
     current = platform_name(value)
     if current == "win32":
         return "edgechromium"
@@ -21,7 +25,7 @@ def runtime_check_required(value: str | None = None) -> bool:
     return platform_name(value) == "win32"
 
 
-def renderer_name(value: str | None = None) -> str:
+def renderer_name(value: str | None = None) -> BrowserRenderer:
     current = platform_name(value)
     if current == "win32":
         return "edgechromium"

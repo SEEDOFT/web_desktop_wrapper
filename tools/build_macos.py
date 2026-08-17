@@ -145,7 +145,6 @@ def embedded_payload() -> dict[str, object]:
         "run_on_startup": config.run_on_startup,
         "allow_file_drop": config.allow_file_drop,
         "wrapper_version": config.wrapper_version,
-        "embedded_webview": config.embedded_webview,
     }
 
 

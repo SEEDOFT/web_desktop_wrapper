@@ -122,37 +122,6 @@ class AppConfigTests(unittest.TestCase):
             config = AppConfig.load()
             self.assertEqual(config.wrapper_version, "2.4.0")
 
-    def test_embedded_webview_default_and_custom(self) -> None:
-        with patch.dict(
-            os.environ,
-            {"WEB_APP_URL": "https://portal.example.test"},
-            clear=True,
-        ):
-            config = AppConfig.load()
-            self.assertTrue(config.embedded_webview)
-
-        with patch.dict(
-            os.environ,
-            {
-                "WEB_APP_URL": "https://portal.example.test",
-                "EMBEDDED_WEBVIEW": "false",
-            },
-            clear=True,
-        ):
-            config = AppConfig.load()
-            self.assertFalse(config.embedded_webview)
-
-        with patch.dict(
-            os.environ,
-            {
-                "WEB_APP_URL": "https://portal.example.test",
-                "EMBED_WEBVIEW": "false",
-            },
-            clear=True,
-        ):
-            config = AppConfig.load()
-            self.assertFalse(config.embedded_webview)
-
 
 if __name__ == "__main__":
     unittest.main()

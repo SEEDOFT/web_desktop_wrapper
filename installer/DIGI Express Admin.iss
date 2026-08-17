@@ -3,6 +3,10 @@
 #define AppPublisher "DIGI Express"
 #define AppExeName "DIGI Express Admin.exe"
 
+#ifndef EmbedWebView2Runtime
+  #define EmbedWebView2Runtime "true"
+#endif
+
 [Setup]
 AppId={{890AE9BF-E4E0-4F14-96B1-7C93EB7ABF7C}
 AppName={#AppName}
@@ -28,16 +32,20 @@ RestartApplications=no
 [Files]
 Source: "staging\x64\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion; Check: IsWin64
 Source: "staging\x86\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion; Check: not IsWin64
+#if EmbedWebView2Runtime == "true"
 Source: "downloads\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: IsWin64 and WebView2NeedsInstall
 Source: "downloads\MicrosoftEdgeWebView2RuntimeInstallerX86.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: (not IsWin64) and WebView2NeedsInstall
+#endif
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 
 [Run]
+#if EmbedWebView2Runtime == "true"
 Filename: "{tmp}\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Parameters: "/silent /install"; StatusMsg: "Installing Microsoft Edge WebView2 Runtime..."; Flags: waituntilterminated; Check: IsWin64 and WebView2NeedsInstall
 Filename: "{tmp}\MicrosoftEdgeWebView2RuntimeInstallerX86.exe"; Parameters: "/silent /install"; StatusMsg: "Installing Microsoft Edge WebView2 Runtime..."; Flags: waituntilterminated; Check: (not IsWin64) and WebView2NeedsInstall
+#endif
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]

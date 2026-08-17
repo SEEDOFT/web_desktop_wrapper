@@ -63,6 +63,12 @@ def parse_args() -> argparse.Namespace:
         help="Desktop wrapper version sent in the 'X-Wrapper-Version' request header (default: 1.0.0).",
     )
     parser.add_argument(
+        "--embed-runtime",
+        action=argparse.BooleanOptionalAction,
+        default=os.getenv("EMBED_WEBVIEW2_RUNTIME", "true").lower() in ("1", "true", "yes", "on"),
+        help="Embed offline WebView2 runtime installers inside setup.exe (default: true).",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Keep console window enabled to view stdout/stderr and tracebacks.",
@@ -208,13 +214,14 @@ def main() -> int:
     if python_bits(x86_python, x86_environment) != 32:
         raise SystemExit(f"Expected 32-bit Python: {x86_python}")
 
-    for architecture in ("X86", "X64"):
-        require_file(
-            INSTALLER_ROOT
-            / "downloads"
-            / f"MicrosoftEdgeWebView2RuntimeInstaller{architecture}.exe",
-            f"WebView2 {architecture} offline installer",
-        )
+    if args.embed_runtime:
+        for architecture in ("X86", "X64"):
+            require_file(
+                INSTALLER_ROOT
+                / "downloads"
+                / f"MicrosoftEdgeWebView2RuntimeInstaller{architecture}.exe",
+                f"WebView2 {architecture} offline installer",
+            )
 
     clean_previous_builds()
 
@@ -249,11 +256,13 @@ def main() -> int:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
 
-    print("\nCompiling combined offline installer...")
+    embed_runtime_flag = "true" if args.embed_runtime else "false"
+    print(f"\nCompiling combined installer (embed offline runtime: {embed_runtime_flag})...")
     subprocess.run(
         [
             str(iscc),
             f"/DAppVersion={args.wrapper_version}",
+            f"/DEmbedWebView2Runtime={embed_runtime_flag}",
             str(INSTALLER_ROOT / "DIGI Express Admin.iss"),
         ],
         cwd=INSTALLER_ROOT,

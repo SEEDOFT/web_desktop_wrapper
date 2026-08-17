@@ -118,7 +118,7 @@ python3 -m pip install -r requirements-macos.txt
 | `RUN_ON_STARTUP`              | `false`              | Launch application automatically on system startup / login                            |
 | `ALLOW_FILE_DROP`             | `false`              | Permit dragging and dropping external local files to navigate the browser window      |
 | `APP_WRAPPER_VERSION`         | `1.0.0`              | Wrapper version sent in the `X-Wrapper-Version` HTTP request header on every request  |
-| `EMBEDDED_WEBVIEW`            | `true`               | Use native embedded webview window (`true`) or open in default system browser (`false`)|
+| `EMBED_WEBVIEW2_RUNTIME`      | `true`               | Embed offline WebView2 runtimes in Windows Setup.exe (`true`) or omit for lightweight installer (`false`) |
 | `BUILDER_ENGINE`              | `pyinstaller`        | Compilation engine: `pyinstaller` (default) or `nuitka` (native C++ compilation)      |
 
 ---
@@ -163,9 +163,9 @@ python tools/build.py --onedir
 
 ### 2. Build Windows Offline Installer (Setup.exe)
 
-Builds a dual-architecture (x86 + x64) offline installer using **Inno Setup 6**. It bundles offline Evergreen WebView2 runtimes and automatically installs the appropriate architecture.
+Builds a dual-architecture (x86 + x64) installer using **Inno Setup 6**. By default, it bundles offline Evergreen WebView2 runtimes and automatically installs the appropriate architecture.
 
-#### Prerequisites:
+#### Prerequisites (if embedding offline runtimes):
 1. Install [Inno Setup 6](https://jrsoftware.org/isdl.php).
 2. Download Microsoft Evergreen Standalone Installers into `installer/downloads/`:
    - `installer/downloads/MicrosoftEdgeWebView2RuntimeInstallerX86.exe`
@@ -173,7 +173,14 @@ Builds a dual-architecture (x86 + x64) offline installer using **Inno Setup 6**.
 
 #### Build Command:
 ```powershell
+# Standard offline installer (bundles offline WebView2 runtimes ~300MB)
 python tools/build_installer.py
+
+# Lightweight installer without embedded offline WebView2 runtimes
+python tools/build_installer.py --no-embed-runtime
+
+# Build installer using Nuitka native C++ compilation
+python tools/build_installer.py --builder nuitka
 ```
 
 #### Custom Toolchain Options:

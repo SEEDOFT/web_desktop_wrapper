@@ -9,6 +9,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    import dotenv
+    dotenv.load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+except Exception:
+    pass
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INSTALLER_ROOT = PROJECT_ROOT / "installer"

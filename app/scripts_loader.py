@@ -14,14 +14,28 @@ def _resolve_scripts_dir() -> Path:
     """Resolve the directory containing standalone JavaScript files."""
     # PyInstaller unpacked temp directory
     if hasattr(sys, "_MEIPASS"):
-        meipass_dir = Path(getattr(sys, "_MEIPASS")) / "app" / "scripts"
-        if meipass_dir.is_dir():
-            return meipass_dir
+        meipass = Path(getattr(sys, "_MEIPASS"))
+        for candidate in (
+            meipass / "app" / "scripts",
+            meipass / "scripts",
+        ):
+            if candidate.is_dir():
+                return candidate
 
     # Normal directory relative to this module
     module_dir = Path(__file__).resolve().parent / "scripts"
     if module_dir.is_dir():
         return module_dir
+
+    # Fallback paths (CWD, executable parent)
+    for candidate in (
+        Path.cwd() / "app" / "scripts",
+        Path.cwd() / "scripts",
+        Path(sys.executable).resolve().parent / "app" / "scripts",
+        Path(sys.executable).resolve().parent / "scripts",
+    ):
+        if candidate.is_dir():
+            return candidate
 
     return Path.cwd() / "app" / "scripts"
 

@@ -828,19 +828,26 @@ def _configure_native_webview(
         # Attach X-Wrapper-Version header to all HTTP requests in WebView2
         if config.wrapper_version and hasattr(core, "AddWebResourceRequestedFilter"):
             try:
-                # 0 corresponds to CoreWebView2WebResourceContext.All
-                core.AddWebResourceRequestedFilter("*", 0)
+                from webview.platforms.edgechromium import CoreWebView2WebResourceContext
+                context_filter = CoreWebView2WebResourceContext.All
+            except Exception:
+                context_filter = 0
+
+            try:
+                core.AddWebResourceRequestedFilter("*", context_filter)
 
                 def _on_web_resource_requested(sender: Any, args: Any) -> None:
                     del sender
                     try:
                         args.Request.Headers.SetHeader("X-Wrapper-Version", config.wrapper_version)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Failed to set X-Wrapper-Version header: %s", exc)
 
                 core.WebResourceRequested += _on_web_resource_requested
+                _register_native_handler(_on_web_resource_requested)
+                logger.debug("Attached X-Wrapper-Version (%s) filter to WebView2", config.wrapper_version)
             except Exception as e:
-                logger.debug("Failed to attach WebResourceRequested filter: %s", e)
+                logger.warning("Failed to attach WebResourceRequested filter: %s", e)
 
         # Inject X-Wrapper-Version into client-side fetch and XMLHttpRequest
         if config.wrapper_version and hasattr(core, "AddScriptToExecuteOnDocumentCreatedAsync"):

@@ -1,3 +1,4 @@
 pywebview==6.2.1
 PyInstaller>=6,<7
 python-dotenv>=1.0,<2
+nuitka>=2.0

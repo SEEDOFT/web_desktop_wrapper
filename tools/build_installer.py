@@ -45,6 +45,22 @@ def parse_args() -> argparse.Namespace:
         / "ISCC.exe",
         help="Inno Setup command-line compiler.",
     )
+    parser.add_argument(
+        "--builder",
+        choices=["pyinstaller", "nuitka"],
+        default=os.getenv("BUILDER_ENGINE", "pyinstaller").lower(),
+        help="Compilation engine: pyinstaller (default) or nuitka (native C++ compilation).",
+    )
+    parser.add_argument(
+        "--wrapper-version",
+        default=os.getenv("APP_WRAPPER_VERSION", os.getenv("WRAPPER_VERSION", "1.0.0")),
+        help="Desktop wrapper version sent in the 'X-Wrapper-Version' request header (default: 1.0.0).",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Keep console window enabled to view stdout/stderr and tracebacks.",
+    )
     return parser.parse_args()
 
 
@@ -98,10 +114,11 @@ def python_bits(python: Path, environment: dict[str, str]) -> int:
     return int(result.stdout.strip())
 
 
-def python_environment(python: Path, architecture: str) -> dict[str, str]:
+def python_environment(python: Path, architecture: str, builder: str = "pyinstaller") -> dict[str, str]:
     environment = os.environ.copy()
+    builder_mod = "nuitka" if builder == "nuitka" else "PyInstaller"
     check = subprocess.run(
-        [str(python), "-c", "import webview, dotenv, PyInstaller"],
+        [str(python), "-c", f"import webview, dotenv, {builder_mod}"],
         cwd=PROJECT_ROOT,
         env=environment,
         capture_output=True,
@@ -117,7 +134,7 @@ def python_environment(python: Path, architecture: str) -> dict[str, str]:
                 os.pathsep + current if current else ""
             )
             retry = subprocess.run(
-                [str(python), "-c", "import webview, dotenv, PyInstaller"],
+                [str(python), "-c", f"import webview, dotenv, {builder_mod}"],
                 cwd=PROJECT_ROOT,
                 env=environment,
                 capture_output=True,
@@ -126,7 +143,7 @@ def python_environment(python: Path, architecture: str) -> dict[str, str]:
                 return environment
 
     raise SystemExit(
-        f"{architecture} Python is missing build dependencies. "
+        f"{architecture} Python is missing build dependencies (requires {builder_mod}). "
         f"Install requirements.txt with: {python} -m pip install -r requirements.txt"
     )
 
@@ -135,10 +152,24 @@ def build_app(
     python: Path,
     architecture: str,
     environment: dict[str, str],
+    builder: str = "pyinstaller",
+    wrapper_version: str = "1.0.0",
+    debug: bool = False,
 ) -> Path:
-    print(f"\nBuilding {architecture} application...")
+    print(f"\nBuilding {architecture} application with {builder.capitalize()}...")
+    command = [
+        str(python),
+        str(BUILD_SCRIPT),
+        "--builder",
+        builder,
+        "--wrapper-version",
+        wrapper_version,
+    ]
+    if debug:
+        command.append("--debug")
+
     subprocess.run(
-        [str(python), str(BUILD_SCRIPT)],
+        command,
         cwd=PROJECT_ROOT,
         env=environment,
         check=True,
@@ -164,8 +195,8 @@ def main() -> int:
     x86_python = require_file(args.x86_python, "x86 Python")
     iscc = require_file(args.iscc, "Inno Setup compiler")
 
-    x64_environment = python_environment(x64_python, "x64")
-    x86_environment = python_environment(x86_python, "x86")
+    x64_environment = python_environment(x64_python, "x64", builder=args.builder)
+    x86_environment = python_environment(x86_python, "x86", builder=args.builder)
     if python_bits(x64_python, x64_environment) != 64:
         raise SystemExit(f"Expected 64-bit Python: {x64_python}")
     if python_bits(x86_python, x86_environment) != 32:
@@ -181,8 +212,22 @@ def main() -> int:
 
     clean_previous_builds()
 
-    x64_app = build_app(x64_python, "x64", x64_environment)
-    x86_app = build_app(x86_python, "x86", x86_environment)
+    x64_app = build_app(
+        x64_python,
+        "x64",
+        x64_environment,
+        builder=args.builder,
+        wrapper_version=args.wrapper_version,
+        debug=args.debug,
+    )
+    x86_app = build_app(
+        x86_python,
+        "x86",
+        x86_environment,
+        builder=args.builder,
+        wrapper_version=args.wrapper_version,
+        debug=args.debug,
+    )
 
     # Keep the conventional standalone dist output as x64 after both builds.
     dist_app = PROJECT_ROOT / "dist" / APP_EXE_NAME

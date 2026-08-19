@@ -1,30 +1,112 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from tools.build_macos import (
+    architecture_suffix,
     parse_args,
     remove_quarantine,
     sha256_file,
     sign_bundle,
+    strip_source_quarantine,
     write_checksum,
 )
 
 
 class BuildMacOSTests(unittest.TestCase):
     def test_parse_args_defaults(self) -> None:
-        with patch("sys.argv", ["build_macos.py"]):
-            args = parse_args()
-            self.assertFalse(args.skip_dmg)
+        with patch.dict("os.environ", {"BUILDER_ENGINE": "pyinstaller", "APP_WRAPPER_VERSION": "1.0.0"}, clear=False):
+            with patch("sys.argv", ["build_macos.py"]):
+                args = parse_args()
+        self.assertFalse(args.skip_dmg)
+        self.assertEqual(args.builder, "pyinstaller")
+        self.assertFalse(args.debug)
+        self.assertFalse(args.onedir)
+        self.assertEqual(args.wrapper_version, "1.0.0")
+        self.assertEqual(args.allowed_host, [])
 
     def test_parse_args_skip_dmg(self) -> None:
         with patch("sys.argv", ["build_macos.py", "--skip-dmg"]):
             args = parse_args()
             self.assertTrue(args.skip_dmg)
+
+    def test_parse_args_skip_quarantine_strip(self) -> None:
+        with patch("sys.argv", ["build_macos.py", "--skip-quarantine-strip"]):
+            args = parse_args()
+            self.assertTrue(args.skip_quarantine_strip)
+
+    @patch("tools.build_macos.remove_quarantine")
+    @patch("tools.build_macos.shutil.which", return_value=None)
+    def test_strip_source_quarantine_covers_project_and_python(
+        self,
+        mock_which: MagicMock,
+        mock_remove: MagicMock,
+    ) -> None:
+        import tools.build_macos as module
+        with patch.object(module, "PROJECT_ROOT", Path("/project")):
+            with patch.object(module.sys, "executable", "/usr/bin/python3"):
+                with patch.object(Path, "exists", return_value=True):
+                    strip_source_quarantine()
+        calls = [call.args[0] for call in mock_remove.call_args_list]
+        self.assertIn(Path("/project"), calls)
+        self.assertIn(Path("/usr/bin/python3").resolve(), calls)
+        self.assertIn(Path(sys.base_prefix).resolve(), calls)
+
+    @patch("tools.build_macos.remove_quarantine")
+    @patch("tools.build_macos.shutil.which", side_effect=lambda name: f"/usr/bin/{name}")
+    def test_strip_source_quarantine_includes_tools(
+        self,
+        mock_which: MagicMock,
+        mock_remove: MagicMock,
+    ) -> None:
+        with patch.object(Path, "exists", return_value=True):
+            strip_source_quarantine()
+        calls = [call.args[0] for call in mock_remove.call_args_list]
+        for tool in ("lipo", "iconutil", "hdiutil", "ditto", "codesign", "xattr", "sips", "nuitka"):
+            self.assertIn(Path(f"/usr/bin/{tool}").resolve(), calls)
+
+    def test_parse_args_custom_flags(self) -> None:
+        with patch(
+            "sys.argv",
+            [
+                "build_macos.py",
+                "--name",
+                "DIGI Admin",
+                "--builder",
+                "nuitka",
+                "--debug",
+                "--onedir",
+                "--allowed-host",
+                "api.example.com",
+                "--allow-subdomains",
+                "--wrapper-version",
+                "2.1.0",
+                "--icon",
+                "assets/digi_express.icns",
+                "--windowed-size",
+                "1440",
+                "900",
+            ],
+        ):
+            args = parse_args()
+            self.assertEqual(args.name, "DIGI Admin")
+            self.assertEqual(args.builder, "nuitka")
+            self.assertTrue(args.debug)
+            self.assertTrue(args.onedir)
+            self.assertEqual(args.allowed_host, ["api.example.com"])
+            self.assertTrue(args.allow_subdomains)
+            self.assertEqual(args.wrapper_version, "2.1.0")
+            self.assertEqual(args.icon, Path("assets/digi_express.icns"))
+            self.assertEqual(args.windowed_size, [1440, 900])
+
+    def test_architecture_suffix(self) -> None:
+        self.assertEqual(architecture_suffix("pyinstaller"), "universal")
+        self.assertEqual(architecture_suffix("nuitka"), "arm64") if __import__("platform").machine().lower() in {"arm64", "aarch64"} else self.assertNotEqual(architecture_suffix("nuitka"), "universal")
 
     def test_sha256_file_and_checksum_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

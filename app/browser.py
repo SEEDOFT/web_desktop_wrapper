@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import importlib
 import json
 import os
 import sys
@@ -828,8 +829,11 @@ def _configure_native_webview(
         # Attach X-Wrapper-Version header to all HTTP requests in WebView2
         if config.wrapper_version and hasattr(core, "AddWebResourceRequestedFilter"):
             try:
-                from webview.platforms.edgechromium import CoreWebView2WebResourceContext
-                context_filter = CoreWebView2WebResourceContext.All
+                edgechromium = importlib.import_module("webview.platforms.edgechromium")
+                context_filter = getattr(
+                    edgechromium,
+                    "CoreWebView2WebResourceContext",
+                ).All
             except Exception:
                 context_filter = 0
 

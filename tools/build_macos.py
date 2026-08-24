@@ -220,19 +220,21 @@ def validate_environment(builder: str) -> None:
         if shutil.which(command) is None:
             raise SystemExit(f"Missing required macOS build tool: {command}")
 
-    try:
-        import Cocoa  # noqa: F401
-        import Quartz  # noqa: F401
-        import Security  # noqa: F401
-        import WebKit  # noqa: F401
-        import webview  # noqa: F401
-        if builder == "pyinstaller":
-            import PyInstaller  # noqa: F401
-    except ImportError as exc:
+    required_modules = ["Cocoa", "Quartz", "Security", "WebKit", "webview"]
+    if builder == "pyinstaller":
+        required_modules.append("PyInstaller")
+    missing_modules = [
+        module
+        for module in required_modules
+        if importlib.util.find_spec(module) is None
+    ]
+    if missing_modules:
         raise SystemExit(
-            "Missing macOS dependencies. Run: "
+            "Missing macOS dependencies: "
+            + ", ".join(missing_modules)
+            + ". Run: "
             "python3 -m pip install -r requirements-macos.txt"
-        ) from exc
+        )
 
     if builder == "pyinstaller":
         result = subprocess.run(

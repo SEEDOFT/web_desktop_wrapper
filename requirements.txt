@@ -1,4 +1,5 @@
 pywebview==6.2.1
 PyInstaller>=6,<7
 python-dotenv>=1.0,<2
+Pillow>=10,<13
 nuitka>=2.0

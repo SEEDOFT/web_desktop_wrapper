@@ -70,6 +70,19 @@ class BuildMacOSTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "must be built on macOS"):
                 module.validate_environment("pyinstaller")
 
+    def test_validate_environment_reports_missing_modules(self) -> None:
+        import tools.build_macos as module
+
+        with patch.object(module.platform, "system", return_value="Darwin"):
+            with patch.object(module.shutil, "which", return_value="/usr/bin/tool"):
+                with patch.object(
+                    module.importlib.util,
+                    "find_spec",
+                    side_effect=lambda name: None if name == "WebKit" else MagicMock(),
+                ):
+                    with self.assertRaisesRegex(SystemExit, "WebKit"):
+                        module.validate_environment("pyinstaller")
+
     @patch("tools.build_macos.remove_quarantine")
     @patch("tools.build_macos.shutil.which", return_value=None)
     def test_strip_source_quarantine_covers_project_and_python(

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from tools.build_macos import (
     architecture_suffix,
+    load_build_environment,
     parse_args,
     remove_quarantine,
     sha256_file,
@@ -30,6 +31,28 @@ class BuildMacOSTests(unittest.TestCase):
         self.assertEqual(args.wrapper_version, "1.0.0")
         self.assertEqual(args.allowed_host, [])
 
+    def test_load_build_environment_supplies_parser_defaults(self) -> None:
+        import tools.build_macos as module
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text(
+                "BUILDER_ENGINE=nuitka\nAPP_WRAPPER_VERSION=3.2.1\n",
+                encoding="utf-8",
+            )
+            with patch.object(module, "ENV_PATH", env_path):
+                with patch.dict(
+                    "os.environ",
+                    {"BUILDER_ENGINE": "pyinstaller", "APP_WRAPPER_VERSION": "1.0.0"},
+                    clear=False,
+                ):
+                    load_build_environment()
+                    with patch("sys.argv", ["build_macos.py"]):
+                        args = parse_args()
+
+        self.assertEqual(args.builder, "nuitka")
+        self.assertEqual(args.wrapper_version, "3.2.1")
+
     def test_parse_args_skip_dmg(self) -> None:
         with patch("sys.argv", ["build_macos.py", "--skip-dmg"]):
             args = parse_args()
@@ -39,6 +62,13 @@ class BuildMacOSTests(unittest.TestCase):
         with patch("sys.argv", ["build_macos.py", "--skip-quarantine-strip"]):
             args = parse_args()
             self.assertTrue(args.skip_quarantine_strip)
+
+    def test_validate_environment_rejects_non_macos(self) -> None:
+        import tools.build_macos as module
+
+        with patch.object(module.platform, "system", return_value="Windows"):
+            with self.assertRaisesRegex(SystemExit, "must be built on macOS"):
+                module.validate_environment("pyinstaller")
 
     @patch("tools.build_macos.remove_quarantine")
     @patch("tools.build_macos.shutil.which", return_value=None)
@@ -56,6 +86,7 @@ class BuildMacOSTests(unittest.TestCase):
         self.assertIn(Path("/project"), calls)
         self.assertIn(Path("/usr/bin/python3").resolve(), calls)
         self.assertIn(Path(sys.base_prefix).resolve(), calls)
+
 
     @patch("tools.build_macos.remove_quarantine")
     @patch("tools.build_macos.shutil.which", side_effect=lambda name: f"/usr/bin/{name}")

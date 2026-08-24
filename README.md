@@ -144,6 +144,28 @@ This guide walks you through everything needed to build the desktop wrapper, fro
    cd web_desktop_wrapper
    ```
 
+#### Sharing the source (optional)
+
+To send a clean source snapshot to someone else (no `.venv`, build artifacts, downloads, or your `.env`), run the cross-platform cleanup script — works on **Windows** and **macOS** (PowerShell / pwsh):
+
+```powershell
+# Remove all generated deps/builds, then create a source .zip next to the folder
+powershell -ExecutionPolicy Bypass -File tools/cleanup.ps1
+
+# Clean only, without creating the ZIP
+powershell -ExecutionPolicy Bypass -File tools/cleanup.ps1 -SkipZip
+
+# Clean and write the ZIP to a specific directory
+powershell -ExecutionPolicy Bypass -File tools/cleanup.ps1 -OutputDir D:\shares
+```
+
+```bash
+# macOS
+pwsh -File tools/cleanup.ps1
+```
+
+The script removes `.venv`, `.build-tools`, `build/`, `dist/`, installer and macOS outputs, offline WebView2 downloads, `__pycache__`, `.icns`, `.spec`, `.DS_Store`, and your `.env` (the recipient must copy `.env.example` → `.env`). The zip excludes the `.git` folder. Source-only project size is ~0.3 MB.
+
 ---
 
 ### 1. Build Windows Standalone Executable (.exe)
@@ -299,6 +321,30 @@ Builds a universal macOS application (`arm64` + `x86_64`), signs it with hardene
 
 > **Note**: Must be run on macOS (macOS 12 Monterey or later).
 
+#### Empty Mac: shortest complete build path
+
+Run the first two commands in Terminal, install the **Universal2** Python `.pkg` from the page that opens, then return to Terminal and run the remaining commands. Replace `/path/to/web_desktop_wrapper` with the folder you copied or cloned onto the Mac.
+
+```bash
+# 1. Install Apple's command-line build tools and open the official Python installer page
+xcode-select --install
+open "https://www.python.org/downloads/macos/"
+
+# 2. After installing the Universal2 Python package, build the project
+cd "/path/to/web_desktop_wrapper"
+lipo -archs "$(command -v python3)"       # must show both: arm64 x86_64
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements-macos.txt
+cp -n .env.example .env
+open -e .env                              # set WEB_APP_URL, save, then close TextEdit
+python3 tools/build_macos.py
+open macos/output
+```
+
+The final DMG, ZIP, and SHA-256 files are in `macos/output/`. On later builds, start with `cd`, activate `.venv`, and run `python3 tools/build_macos.py` again.
+
 #### Step 3.1 — Install Universal2 Python
 1. Download the **Universal2** macOS installer for Python 3.10+ from <https://www.python.org/downloads/macos/> (the package name contains "Universal2").
 2. Run the `.pkg` installer.
@@ -355,10 +401,13 @@ python3 tools/build_macos.py
 python3 tools/build_macos.py --skip-dmg
 ```
 The script:
-1. Strips `com.apple.quarantine` and extended attributes from the project tree and toolchain (Python, `lipo`, `iconutil`, `hdiutil`, `ditto`, `codesign`, `sips`) so downloaded files never trip Gatekeeper mid-build.
-2. Generates a multi-resolution `.icns` from `assets/digi_portrait.jpg` (or landscape fallback).
-3. Compiles the `.app`, patches `Info.plist`, ad-hoc signs with hardened runtime, and removes quarantine.
-4. Creates the ZIP (always) and DMG (unless `--skip-dmg`) with checksums.
+1. Loads `.env` before resolving build defaults, validates its settings, and writes the supported runtime values temporarily to `app/embedded_config.py`.
+2. Strips `com.apple.quarantine` and extended attributes from the project tree and toolchain (Python, `lipo`, `iconutil`, `hdiutil`, `ditto`, `codesign`, `sips`) so downloaded files never trip Gatekeeper mid-build.
+3. Generates a multi-resolution `.icns` from `assets/digi_portrait.jpg` (or landscape fallback).
+4. Compiles the `.app`, patches `Info.plist`, ad-hoc signs with hardened runtime, and removes quarantine.
+5. Creates the ZIP (always) and DMG (unless `--skip-dmg`) with checksums.
+
+The raw `.env` file is deliberately **not** copied into the application bundle. Its supported application settings are embedded in generated Python configuration, so the built app works without `.env` while avoiding distribution of unrelated environment entries. The generated source file is restored after every build, including failed builds.
 
 #### Step 3.7 — Custom build options
 ```bash

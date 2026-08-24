@@ -30,6 +30,13 @@ DEFAULT_APP_NAME = "DIGI Express Admin"
 DEFAULT_BUNDLE_ID = "com.digiexpress.admin"
 MACOS_ROOT = PROJECT_ROOT / "macos"
 OUTPUT_ROOT = MACOS_ROOT / "output"
+ENV_PATH = PROJECT_ROOT / ".env"
+
+
+def load_build_environment() -> None:
+    """Load build-time defaults before argparse reads environment variables."""
+    if ENV_PATH.is_file():
+        load_dotenv(ENV_PATH, override=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -203,8 +210,10 @@ def clean_previous_builds() -> None:
         spec.unlink()
 
 
-def validate_environment() -> None:
-    if sys.platform != "darwin":
+def validate_environment(builder: str) -> None:
+    # Use the runtime platform API so Windows-based type checkers do not mark
+    # the remainder of this macOS-only validation function as unreachable.
+    if platform.system() != "Darwin":
         raise SystemExit("The macOS application must be built on macOS.")
 
     for command in ("lipo", "iconutil", "hdiutil", "ditto", "codesign", "xattr"):
@@ -213,33 +222,36 @@ def validate_environment() -> None:
 
     try:
         import Cocoa  # noqa: F401
-        import PyInstaller  # noqa: F401
         import Quartz  # noqa: F401
         import Security  # noqa: F401
         import WebKit  # noqa: F401
         import webview  # noqa: F401
+        if builder == "pyinstaller":
+            import PyInstaller  # noqa: F401
     except ImportError as exc:
         raise SystemExit(
             "Missing macOS dependencies. Run: "
             "python3 -m pip install -r requirements-macos.txt"
         ) from exc
 
-    result = subprocess.run(
-        ["lipo", "-archs", sys.executable],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    architectures = set(result.stdout.split())
-    if not {"arm64", "x86_64"}.issubset(architectures):
-        raise SystemExit(
-            "Universal2 Python is required; current Python architectures: "
-            + ", ".join(sorted(architectures))
+    if builder == "pyinstaller":
+        result = subprocess.run(
+            ["lipo", "-archs", sys.executable],
+            check=True,
+            capture_output=True,
+            text=True,
         )
+        architectures = set(result.stdout.split())
+        if not {"arm64", "x86_64"}.issubset(architectures):
+            raise SystemExit(
+                "Universal2 Python is required for the PyInstaller build; "
+                "current Python architectures: "
+                + ", ".join(sorted(architectures))
+            )
 
 
 def embedded_payload(args: argparse.Namespace) -> dict[str, object]:
-    load_dotenv(PROJECT_ROOT / ".env", override=True)
+    load_build_environment()
     config = AppConfig.load()
 
     allow_insecure_http = args.allow_insecure_http or config.allow_insecure_http
@@ -557,10 +569,10 @@ def create_distribution(
 
 
 def main() -> int:
+    load_build_environment()
     args = parse_args()
-    validate_environment()
-
     builder_engine = args.builder.lower()
+    validate_environment(builder_engine)
     if builder_engine == "nuitka":
         if importlib.util.find_spec("nuitka") is None and shutil.which("nuitka") is None:
             print(

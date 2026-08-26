@@ -414,6 +414,7 @@ def build_nuitka(
     wrapper_version: str,
     environment: dict[str, str],
 ) -> None:
+    console_mode = "force" if args.debug else "disable"
     command = [
         sys.executable,
         "-m",
@@ -426,11 +427,12 @@ def build_nuitka(
         "--enable-plugin=no-qt",
         "--no-deployment-flag=excluded-module-usage",
         f"--output-dir={PROJECT_ROOT / 'dist'}",
-        f"--output-filename={safe_executable_name(app_name)}",
+        f"--output-folder-name={safe_executable_name(app_name)}",
         "--macos-create-app-bundle",
         f"--macos-app-name={app_name}",
         f"--macos-signed-app-name={bundle_id}",
         f"--macos-app-version={wrapper_version}",
+        f"--macos-app-console-mode={console_mode}",
         "--include-package=app",
         "--include-package=dotenv",
         "--include-package=webview",
@@ -439,10 +441,6 @@ def build_nuitka(
         f"--include-data-dir={PROJECT_ROOT / 'app' / 'scripts'}=app/scripts",
         f"--macos-app-icon={icon}",
     ]
-    if not args.debug:
-        command.append("--macos-disable-console")
-    if not args.onedir:
-        command.append("--onefile")
     command.append(str(PROJECT_ROOT / "run.py"))
     run(command, environment=environment)
 
@@ -450,14 +448,24 @@ def build_nuitka(
 def locate_app_bundle(app_name: str) -> Path:
     dist = PROJECT_ROOT / "dist"
     expected = dist / f"{app_name}.app"
-    if expected.is_dir():
+    if expected.is_dir() and (expected / "Contents" / "Info.plist").is_file():
         return expected
 
-    candidates = [p for p in dist.glob("*.app") if p.is_dir()]
+    # Find any .app bundle that contains Info.plist
+    candidates = [
+        p
+        for p in dist.glob("**/*.app")
+        if p.is_dir() and (p / "Contents" / "Info.plist").is_file()
+    ]
     if not candidates:
-        raise SystemExit(f"No .app bundle was produced in {dist}.")
+        raise SystemExit(f"No valid .app bundle with Contents/Info.plist was produced in {dist}.")
     source = candidates[0]
     if source != expected:
+        if expected.exists():
+            if expected.is_dir():
+                shutil.rmtree(expected)
+            else:
+                expected.unlink()
         shutil.move(str(source), str(expected))
     return expected
 
@@ -526,7 +534,7 @@ def remove_quarantine(path: Path) -> None:
 
 def sign_bundle(path: Path) -> None:
     remove_quarantine(path)
-    result = run(["codesign", "--force", "--deep", "--sign", "-", "--options", "runtime", str(path)], check=False)
+    result = run(["codesign", "--force", "--deep", "--sign", "-", str(path)], check=False)
     remove_quarantine(path)
     if result.returncode != 0:
         print(f"[WARN] Codesign failed (return code {result.returncode}); continuing without signature")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+from typing import Any
 
 from app.browser import run_browser
 from app.config import AppConfig, ConfigError
@@ -19,15 +20,20 @@ _IS_MACOS = sys.platform == "darwin"
 
 def _message_box(title: str, message: str) -> None:
     if _IS_WINDOWS:
-        ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)
+        windll = getattr(ctypes, "windll", None)
+        if windll is not None:
+            windll.user32.MessageBoxW(None, message, title, 0x10)
+        else:
+            print(f"{title}: {message}")
     elif _IS_MACOS:
         try:
             import AppKit  # type: ignore[import-not-found]
+            appkit_mod: Any = AppKit
 
-            alert = AppKit.NSAlert.alloc().init()
+            alert = appkit_mod.NSAlert.alloc().init()
             alert.setMessageText_(title)
             alert.setInformativeText_(message)
-            alert.setAlertStyle_(AppKit.NSAlertStyleCritical)
+            alert.setAlertStyle_(appkit_mod.NSAlertStyleCritical)
             alert.addButtonWithTitle_("OK")
             alert.runModal()
         except Exception:

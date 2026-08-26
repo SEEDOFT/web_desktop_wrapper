@@ -49,12 +49,31 @@ A native desktop wrapper for modern web applications powered by **Microsoft Edge
 
 ## Quick Start
 
-### 1. Environment Setup
+### 1-Step Automated Build (Recommended)
+
+#### macOS (Terminal):
+```bash
+# Automatically sets up .venv, installs dependencies, and builds with Nuitka
+./build.sh
+```
+
+#### Windows (PowerShell):
+```powershell
+# Automatically sets up .venv, installs dependencies, and builds with Nuitka
+.\build.ps1
+
+# Or build the complete offline Windows Setup installer:
+.\build.ps1 -Installer
+```
+
+---
+
+### Manual Environment Setup
 
 #### Windows (PowerShell):
 ```powershell
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
@@ -71,7 +90,7 @@ python3 -m pip install -r requirements-macos.txt
 
 > **Note**: Do not install PySide6, PyQt, or CEF in this environment to ensure the build collects only native components.
 
-### 2. Development Mode
+### Development Mode
 
 1. Copy `.env.example` to `.env` and configure your web application:
    ```bash
@@ -146,10 +165,21 @@ This guide walks you through everything needed to build the desktop wrapper, fro
 
 #### Sharing the source (optional)
 
-To send a clean source snapshot to someone else (no `.venv`, build artifacts, downloads, or your `.env`), run the cross-platform cleanup script — works on **Windows** and **macOS** (PowerShell / pwsh):
+To send a clean source snapshot to someone else (no `.venv`, build artifacts, downloads, or your `.env`), run the cleanup script:
+
+```bash
+# macOS / Linux
+./tools/cleanup.sh
+
+# Clean only, without creating the ZIP
+./tools/cleanup.sh --skip-zip
+
+# Clean and write the ZIP to a specific directory
+./tools/cleanup.sh --output-dir ~/Desktop
+```
 
 ```powershell
-# Remove all generated deps/builds, then create a source .zip next to the folder
+# Windows (PowerShell)
 powershell -ExecutionPolicy Bypass -File tools/cleanup.ps1
 
 # Clean only, without creating the ZIP
@@ -159,12 +189,7 @@ powershell -ExecutionPolicy Bypass -File tools/cleanup.ps1 -SkipZip
 powershell -ExecutionPolicy Bypass -File tools/cleanup.ps1 -OutputDir D:\shares
 ```
 
-```bash
-# macOS
-pwsh -File tools/cleanup.ps1
-```
-
-The script removes `.venv`, `.build-tools`, `build/`, `dist/`, installer and macOS outputs, offline WebView2 downloads, `__pycache__`, `.icns`, `.spec`, `.DS_Store`, and your `.env` (the recipient must copy `.env.example` → `.env`). The zip excludes the `.git` folder. Source-only project size is ~0.3 MB.
+The script removes `.venv`, `.build-tools`, `build/`, `dist/`, installer and macOS outputs, offline WebView2 downloads, `__pycache__`, `.icns`, `.spec`, `.DS_Store`, and your `.env` (the recipient must copy `.env.example` → `.env`). The zip excludes the `.git` folder. Source-only project size is ~0.5 MB.
 
 ---
 

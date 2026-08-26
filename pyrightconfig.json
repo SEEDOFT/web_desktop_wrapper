@@ -1,4 +1,19 @@
 {
+  "include": [
+    "app",
+    "tools",
+    "tests",
+    "run.py"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    ".venv",
+    "build",
+    "dist",
+    "macos/staging",
+    "macos/output"
+  ],
   "venvPath": ".",
   "venv": ".venv"
 }

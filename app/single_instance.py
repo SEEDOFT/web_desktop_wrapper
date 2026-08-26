@@ -25,7 +25,9 @@ class SingleInstanceLock:
             if self._handle:
                 try:
                     import ctypes
-                    ctypes.windll.kernel32.CloseHandle(self._handle)
+                    windll = getattr(ctypes, "windll", None)
+                    if windll is not None:
+                        windll.kernel32.CloseHandle(self._handle)
                 except Exception as e:
                     logger.debug("Failed to close single instance mutex handle: %s", e)
                 self._handle = None
@@ -51,14 +53,16 @@ def activate_existing_window(app_title: str) -> None:
     if sys.platform == "win32":
         try:
             import ctypes
-            user32 = ctypes.windll.user32
-            # Find window by title
-            hwnd = user32.FindWindowW(None, app_title)
-            if hwnd:
-                # SW_RESTORE = 9, SW_SHOW = 5
-                user32.ShowWindow(hwnd, 9)
-                user32.SetForegroundWindow(hwnd)
-                logger.info("Activated existing window '%s'", app_title)
+            windll = getattr(ctypes, "windll", None)
+            if windll is not None:
+                user32 = windll.user32
+                # Find window by title
+                hwnd = user32.FindWindowW(None, app_title)
+                if hwnd:
+                    # SW_RESTORE = 9, SW_SHOW = 5
+                    user32.ShowWindow(hwnd, 9)
+                    user32.SetForegroundWindow(hwnd)
+                    logger.info("Activated existing window '%s'", app_title)
         except Exception as e:
             logger.debug("Failed to activate existing Windows window: %s", e)
     elif sys.platform == "darwin":
@@ -89,7 +93,10 @@ def acquire_single_instance(app_id: str, app_title: str) -> SingleInstanceLock |
     if sys.platform == "win32":
         try:
             import ctypes
-            kernel32 = ctypes.windll.kernel32
+            windll = getattr(ctypes, "windll", None)
+            if windll is None:
+                return None
+            kernel32 = windll.kernel32
             # Create a unique named mutex for the application
             mutex_name = f"Local\\WebDesktopWrapper_{app_id}"
             mutex = kernel32.CreateMutexW(None, False, mutex_name)

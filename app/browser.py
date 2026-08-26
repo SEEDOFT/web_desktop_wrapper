@@ -178,7 +178,7 @@ def _shortcut_action(
     if isinstance(key, int):
         normalized_key = KEYBOARD_KEY_CODES.get(key)
     else:
-        normalized_key = str(key).lower()
+        normalized_key = key.lower()
 
     if normalized_key is None:
         return None
@@ -476,7 +476,7 @@ def _apply_window_icon(native_form: Any, app_icon: str) -> None:
     if not app_icon or not os.path.exists(app_icon):
         return
     try:
-        import clr
+        clr = importlib.import_module("clr")
         add_reference = getattr(clr, "AddReference", None)
         if callable(add_reference):
             add_reference("System.Drawing")
@@ -494,14 +494,24 @@ def _apply_dark_mode_titlebar(native_form: Any, background_color: str) -> None:
         handle = getattr(native_form, "Handle", None)
         if handle is None:
             return
-        hwnd = int(getattr(handle, "ToInt64", lambda: int(handle))())
-        if not hwnd:
+        handle_val = handle.ToInt64() if hasattr(handle, "ToInt64") and callable(handle.ToInt64) else handle
+        hwnd: int = 0
+        try:
+            hwnd = int(handle_val) if isinstance(handle_val, (int, float)) else int(str(handle_val))
+        except (TypeError, ValueError):
+            return
+        if hwnd <= 0:
             return
 
         import ctypes
         from ctypes import wintypes
 
-        dwm = ctypes.windll.dwmapi
+        windll: Any = getattr(ctypes, "windll", None)
+        if not windll:
+            return
+        dwm: Any = getattr(windll, "dwmapi", None)
+        if not dwm:
+            return
         value = ctypes.c_int(1)
         for attr in (20, 19):
             hr = dwm.DwmSetWindowAttribute(
@@ -1164,7 +1174,7 @@ def run_browser(config: AppConfig) -> int:
         lambda renderer: _renderer_initialized(renderer, expected_renderer)
     )
 
-    if config.wrapper_version:
+    if config.wrapper_version and backend == "edgechromium":
         def _attach_request_version_header(request: Any) -> None:
             try:
                 if hasattr(request, "headers") and isinstance(request.headers, dict):

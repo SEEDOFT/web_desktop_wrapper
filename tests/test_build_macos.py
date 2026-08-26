@@ -232,7 +232,8 @@ class BuildMacOSTests(unittest.TestCase):
                 sign_bundle(app_path)
                 self.assertEqual(mock_quarantine.call_count, 2)
                 mock_run.assert_called_once_with(
-                    ["codesign", "--force", "--deep", "--sign", "-", "--options", "runtime", str(app_path)]
+                    ["codesign", "--force", "--deep", "--sign", "-", str(app_path)],
+                    check=False,
                 )
 
 

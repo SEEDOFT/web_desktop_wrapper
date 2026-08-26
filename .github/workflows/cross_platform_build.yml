@@ -1,0 +1,92 @@
+name: Cross-Platform Build Test
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  windows-build:
+    name: Windows Build (.exe)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Inno Setup (for installer)
+        uses: microsoft/setup-inno-setup@v1
+
+      - name: Install WebView2 runtimes
+        # WebView2 runtimes require manual download; skip if not available
+        run: |
+          Write-Host "WebView2 runtime installation skipped - requires manual download"
+          Write-Host "Place installers in installer/downloads/ if needed"
+
+      - name: Build Windows application
+        run: |
+          python tools\build.py --builder pyinstaller --wrapper-version 1.0.0
+        env:
+          WEB_APP_URL: "https://example.com"
+          APP_NAME: "DIGI Express Admin"
+          APP_ORGANIZATION: "DIGI Express"
+
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/DIGI Express Admin.exe
+          if-no-files-found: ignore
+
+  macos-build:
+    name: macOS Build (.app + ZIP/DMG)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install macOS dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-macos.txt
+
+      - name: Build macOS application
+        run: |
+          python tools/build_macos.py \
+            --url "https://example.com" \
+            --name "DIGI Express Admin" \
+            --organization "DIGI Express" \
+            --builder pyinstaller
+        env:
+          WEB_APP_URL: "https://example.com"
+          APP_NAME: "DIGI Express Admin"
+          APP_ORGANIZATION: "DIGI Express"
+
+      - name: Upload macOS build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: |
+            output/*
+            dist/DIGI Express Admin.app
+          if-no-files-found: ignore

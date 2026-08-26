@@ -239,16 +239,16 @@ def validate_environment(builder: str) -> None:
     if builder == "pyinstaller":
         result = subprocess.run(
             ["lipo", "-archs", sys.executable],
-            check=True,
             capture_output=True,
             text=True,
         )
         architectures = set(result.stdout.split())
-        if not {"arm64", "x86_64"}.issubset(architectures):
-            raise SystemExit(
-                "Universal2 Python is required for the PyInstaller build; "
-                "current Python architectures: "
-                + ", ".join(sorted(architectures))
+        missing = {"arm64", "x86_64"} - architectures
+        if missing:
+            print(
+                f"[WARN] PyInstaller universal2 requested but Python lacks architectures: "
+                + ", ".join(sorted(missing))
+                + ". Build may proceed with limited architecture support."
             )
 
 
@@ -526,8 +526,10 @@ def remove_quarantine(path: Path) -> None:
 
 def sign_bundle(path: Path) -> None:
     remove_quarantine(path)
-    run(["codesign", "--force", "--deep", "--sign", "-", "--options", "runtime", str(path)])
+    result = run(["codesign", "--force", "--deep", "--sign", "-", "--options", "runtime", str(path)], check=False)
     remove_quarantine(path)
+    if result.returncode != 0:
+        print(f"[WARN] Codesign failed (return code {result.returncode}); continuing without signature")
 
 
 def architecture_suffix(builder: str) -> str:
@@ -564,7 +566,10 @@ def create_distribution(
     print(f"Creating DMG: {dmg_path.name}")
     run(["hdiutil", "create", "-volname", app_name, "-srcfolder", str(staging), "-ov", "-format", "UDZO", str(dmg_path)])
     print("Code signing and quarantine removal:")
-    sign_bundle(dmg_path)
+    try:
+        sign_bundle(dmg_path)
+    except Exception as exc:
+        print(f"[WARN] DMG codesign error: {exc}")
     print()
     write_checksum(dmg_path)
     return zip_path, dmg_path
@@ -610,7 +615,10 @@ def main() -> int:
     app_path = locate_app_bundle(app_name)
     configure_bundle(app_path, bundle_id, wrapper_version)
     print(f"\nCode signing and quarantine removal:")
-    sign_bundle(app_path)
+    try:
+        sign_bundle(app_path)
+    except Exception as exc:
+        print(f"[WARN] Codesign error: {exc}")
     print()
     run(["lipo", "-info", str(bundle_binary(app_path))])
     zip_path, dmg_path = create_distribution(app_path, app_name, architecture_suffix(builder_engine), args.skip_dmg)

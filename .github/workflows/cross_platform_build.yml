@@ -28,15 +28,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Inno Setup (for installer)
-        uses: microsoft/setup-inno-setup@v1
-
-      - name: Install WebView2 runtimes
-        # WebView2 runtimes require manual download; skip if not available
-        run: |
-          Write-Host "WebView2 runtime installation skipped - requires manual download"
-          Write-Host "Place installers in installer/downloads/ if needed"
-
       - name: Build Windows application
         run: |
           python tools\build.py --builder pyinstaller --wrapper-version 1.0.0

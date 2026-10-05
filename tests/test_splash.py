@@ -1,18 +1,32 @@
 from __future__ import annotations
 
-import unittest
-from unittest.mock import patch
 import os
+import threading
+import unittest
+from unittest.mock import Mock, patch
 
+from app.browser import _show_first_frame
 from app.config import AppConfig
 from app.splash import (
     SPLASH_BACKGROUND,
-    generate_splash_html,
     _load_splash_logo_data_uri,
+    generate_splash_html,
 )
 
 
 class SplashTests(unittest.TestCase):
+    def test_loaded_page_replaces_splash_without_fixed_delay(self) -> None:
+        window = Mock()
+        splash_window = Mock()
+        ready = threading.Event()
+        config = Mock(spec=AppConfig, start_maximized=False)
+
+        _show_first_frame(window, ready, config, splash_window)
+
+        window.show.assert_called_once_with()
+        splash_window.destroy.assert_called_once_with()
+        self.assertTrue(ready.is_set())
+
     def test_splash_background_is_valid_hex(self) -> None:
         self.assertTrue(SPLASH_BACKGROUND.startswith("#"))
         self.assertEqual(len(SPLASH_BACKGROUND), 7)

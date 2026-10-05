@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -116,7 +115,6 @@ def setup_system_tray(
             shown_balloon = {"shown": False}
 
             def on_form_closing(sender: Any, e: Any) -> None:
-                global _IS_QUITTING
                 if not _IS_QUITTING:
                     e.Cancel = True
                     native_form.Hide()

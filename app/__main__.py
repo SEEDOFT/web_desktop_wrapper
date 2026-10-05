@@ -28,8 +28,7 @@ if sys.platform == "win32":
 elif sys.platform == "darwin":
     os.environ.setdefault("PYWEBVIEW_GUI", "cocoa")
 
-from app.main import run  # noqa: E402
-
+from app.main import run
 
 if __name__ == "__main__":
     raise SystemExit(run())

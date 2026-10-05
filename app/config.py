@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import ParseResult, urlparse
@@ -24,20 +25,26 @@ from app.config_validators import (
 
 
 def _is_frozen() -> bool:
-    has_embedded = bool(getattr(embedded_config, "CONFIG", None))
     return bool(
         getattr(sys, "frozen", False)
         or hasattr(sys, "__nuitka_version__")
         or hasattr(sys, "nuitka_version")
         or "__compiled__" in globals()
         or "__compiled__" in sys.modules
-        or has_embedded
     )
+
+
+def configuration_source() -> str:
+    """Return a safe description of the active configuration source."""
+    return "embedded environment" if _is_frozen() else "development .env"
 
 
 def _load_development_environment() -> None:
     """Load .env only for source development, never for packaged applications."""
     if _is_frozen():
+        content = getattr(embedded_config, "ENV_TEXT", "")
+        if content:
+            load_dotenv(stream=StringIO(content), override=True)
         return
 
     candidates = (
@@ -102,9 +109,11 @@ class AppConfig:
     wrapper_version: str = "1.0.0"
 
     @classmethod
-    def load(cls) -> "AppConfig":
+    def load(cls, *, packaged: bool | None = None) -> AppConfig:
         embedded = _embedded_config()
-        is_frozen = _is_frozen()
+        is_frozen = _is_frozen() if packaged is None else packaged
+        if packaged is False:
+            embedded = {}
 
         app_name = str(
             get_config_value(

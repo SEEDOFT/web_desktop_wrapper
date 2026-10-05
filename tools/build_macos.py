@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import json
 import os
 import platform
 import plistlib
@@ -17,13 +18,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.config import AppConfig  # noqa: E402
-from tools.build import (  # noqa: E402
+from app.config import AppConfig
+from tools.build import (
     normalize_local_url,
     safe_executable_name,
     validate_url,
 )
-
 
 EMBEDDED_CONFIG_PATH = PROJECT_ROOT / "app" / "embedded_config.py"
 DEFAULT_APP_NAME = "DIGI Express Admin"
@@ -41,7 +41,7 @@ def load_build_environment() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build the universal macOS app, unsigned DMG, and ZIP archive."
+        description="Build a macOS app and development or notarized distribution artifacts."
     )
     parser.add_argument(
         "--url",
@@ -128,12 +128,23 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep the console visible to view stdout/stderr and tracebacks.",
     )
-    parser.add_argument("--skip-dmg", action="store_true", help="Build the .app and ZIP only.")
     parser.add_argument(
-        "--skip-quarantine-strip",
-        action="store_true",
-        help="Skip stripping com.apple.quarantine from the project and toolchain before building.",
+        "--distribution",
+        choices=["development", "direct"],
+        default=os.getenv("MACOS_DISTRIBUTION", "development").lower(),
+        help="development uses ad-hoc signing; direct uses Developer ID and notarization.",
     )
+    parser.add_argument(
+        "--signing-identity",
+        default=os.getenv("MACOS_SIGNING_IDENTITY", ""),
+        help="Developer ID Application identity used by --distribution direct.",
+    )
+    parser.add_argument(
+        "--notary-profile",
+        default=os.getenv("MACOS_NOTARY_PROFILE", ""),
+        help="Keychain profile created by 'xcrun notarytool store-credentials'.",
+    )
+    parser.add_argument("--skip-dmg", action="store_true", help="Build the .app and ZIP only.")
     return parser.parse_args()
 
 
@@ -143,7 +154,11 @@ def run(
     environment: dict[str, str] | None = None,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=PROJECT_ROOT, env=environment, check=check, text=True, capture_output=True)
+    result = subprocess.run(command, cwd=PROJECT_ROOT, env=environment, check=False, text=True, capture_output=True)
+    if check and result.returncode:
+        print(result.stderr or result.stdout, file=sys.stderr)
+        raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
+    return result
 
 
 def sha256_file(path: Path) -> str:
@@ -161,40 +176,6 @@ def write_checksum(path: Path) -> None:
         encoding="utf-8",
     )
     print(f"SHA-256 ({path.name}): {checksum}")
-
-
-def strip_source_quarantine() -> None:
-    """Recursively strip com.apple.quarantine and extended attributes from the
-    project tree and the local build toolchain.
-
-    Files downloaded from the internet (e.g. a cloned repository or pip wheels)
-    carry the com.apple.quarantine attribute. Gatekeeper can then block tools
-    and the interpreter mid-build on later runs, causing intermittent failures
-    that look unrelated to the code. Stripping the attribute up front keeps the
-    build working reliably over long periods of time.
-
-    If permission is denied (e.g. a read-only system path), the error is
-    reported as a warning instead of aborting the build.
-    """
-    print("Stripping quarantine and extended attributes from the project and toolchain...")
-
-    targets: list[Path] = [PROJECT_ROOT, Path(sys.executable).resolve()]
-    if sys.base_prefix:
-        targets.append(Path(sys.base_prefix).resolve())
-    for tool in ("lipo", "iconutil", "hdiutil", "ditto", "codesign", "xattr", "sips", "nuitka"):
-        tool_path = shutil.which(tool)
-        if tool_path:
-            targets.append(Path(tool_path).resolve())
-
-    seen: set[Path] = set()
-    for target in targets:
-        if target in seen or not target.exists():
-            continue
-        seen.add(target)
-        try:
-            remove_quarantine(target)
-        except Exception as exc:  # pragma: no cover - depends on host FS
-            print(f"[WARN] Could not strip quarantine from {target}: {exc}", file=sys.stderr)
 
 
 def clean_previous_builds() -> None:
@@ -241,27 +222,62 @@ def validate_environment(builder: str) -> None:
             ["lipo", "-archs", sys.executable],
             capture_output=True,
             text=True,
+            check=False,
         )
         architectures = set(result.stdout.split())
         missing = {"arm64", "x86_64"} - architectures
         if missing:
-            print(
-                f"[WARN] PyInstaller universal2 requested but Python lacks architectures: "
+            raise SystemExit(
+                "PyInstaller universal2 requires a Universal2 Python; missing: "
                 + ", ".join(sorted(missing))
-                + ". Build may proceed with limited architecture support."
             )
+
+
+def validate_direct_distribution(args: argparse.Namespace) -> None:
+    """Validate direct-distribution inputs before doing an expensive build."""
+    if args.distribution != "direct":
+        return
+    if args.skip_dmg:
+        raise SystemExit("Direct distribution requires a DMG; remove --skip-dmg.")
+    if not args.signing_identity.strip():
+        raise SystemExit(
+            "Direct distribution requires --signing-identity with a "
+            "Developer ID Application certificate."
+        )
+    if "Developer ID Application:" not in args.signing_identity:
+        raise SystemExit(
+            "The signing identity must be a Developer ID Application certificate."
+        )
+    if not args.notary_profile.strip():
+        raise SystemExit(
+            "Direct distribution requires --notary-profile created with "
+            "'xcrun notarytool store-credentials'."
+        )
+    for command in ("xcrun", "spctl", "security"):
+        if shutil.which(command) is None:
+            raise SystemExit(f"Missing required direct-distribution tool: {command}")
+
+    identity = run(
+        ["security", "find-identity", "-v", "-p", "codesigning"],
+        check=False,
+    )
+    if identity.returncode != 0 or args.signing_identity not in identity.stdout:
+        raise SystemExit(
+            f"Signing identity is not available in the keychain: {args.signing_identity}"
+        )
 
 
 def embedded_payload(args: argparse.Namespace) -> dict[str, object]:
     load_build_environment()
-    config = AppConfig.load()
+    # Build inputs come from .env/CLI even if an interrupted build left CONFIG populated.
+    config = AppConfig.load(packaged=False)
 
     allow_insecure_http = args.allow_insecure_http or config.allow_insecure_http
     web_app_url = normalize_local_url(args.url or config.web_app_url)
     try:
         primary_host = validate_url(web_app_url, allow_insecure_http)
     except ValueError as exc:
-        raise SystemExit(f"Configuration error: {exc}")
+        raise SystemExit(f"Configuration error: {exc}") from exc
 
     app_name = (args.name or config.app_name).strip() or DEFAULT_APP_NAME
     organization_name = (args.organization or config.organization_name).strip()
@@ -317,6 +333,7 @@ def embedded_payload(args: argparse.Namespace) -> dict[str, object]:
 def write_embedded_config(payload: dict[str, object]) -> None:
     EMBEDDED_CONFIG_PATH.write_text(
         '"""Generated temporarily by tools/build_macos.py."""\n\n'
+        f"ENV_TEXT = {ENV_PATH.read_text(encoding='utf-8')!r}\n"
         f"CONFIG = {payload!r}\n",
         encoding="utf-8",
     )
@@ -351,6 +368,9 @@ def resolve_icon(args: argparse.Namespace) -> Path:
         if icon.suffix.lower() != ".icns":
             raise SystemExit("Configuration error: macOS icons must be .icns files.")
         return icon
+    default_icon = PROJECT_ROOT / "assets" / "digi_express.icns"
+    if default_icon.is_file():
+        return default_icon
     return generate_icon()
 
 
@@ -475,11 +495,32 @@ def bundle_binary(app_path: Path) -> Path:
     entries = [
         p
         for p in macos_dir.iterdir()
-        if p.is_file() and not p.suffix.lower() in {".dylib", ".so", ".a"}
+        if p.is_file() and p.suffix.lower() not in {".dylib", ".so", ".a"}
     ]
     if not entries:
         raise SystemExit(f"No executable found in {macos_dir}.")
     return entries[0]
+
+
+def validate_bundle_architectures(app_path: Path, builder: str) -> None:
+    expected = (
+        {"arm64", "x86_64"}
+        if builder == "pyinstaller"
+        else {architecture_suffix(builder)}
+    )
+    failures: list[str] = []
+    for path in [bundle_binary(app_path), *nested_code_paths(app_path)]:
+        if path.is_dir():
+            continue
+        result = run(["lipo", "-archs", str(path)], check=False)
+        if result.returncode != 0:
+            continue
+        architectures = set(result.stdout.split())
+        missing = expected - architectures
+        if missing:
+            failures.append(f"{path.relative_to(app_path)} missing {', '.join(sorted(missing))}")
+    if failures:
+        raise SystemExit("Bundle architecture validation failed:\n" + "\n".join(failures))
 
 
 def configure_bundle(app_path: Path, bundle_id: str, wrapper_version: str) -> None:
@@ -495,49 +536,87 @@ def configure_bundle(app_path: Path, bundle_id: str, wrapper_version: str) -> No
         plistlib.dump(plist, handle)
 
 
-def remove_quarantine(path: Path) -> None:
-    """Remove macOS quarantine and extended attributes from a file or bundle.
-    
-    The quarantine attribute (com.apple.quarantine) is set by Gatekeeper when a file
-    is downloaded from the internet or created from untrusted sources. Removing it
-    along with Finder detritus ensures the app bundle, ZIP, and DMG open cleanly without
-    Gatekeeper blockers or codesign detritus errors.
-    
-    Args:
-        path: File or directory bundle to remove quarantine from.
-    """
-    if not path.exists():
-        return
-
-    is_dir = path.is_dir()
-    target_desc = f"app bundle: {path.name}" if is_dir else path.name
-    print(f"Removing quarantine attribute from {target_desc}")
-
-    # Remove com.apple.quarantine attribute specifically
-    quarantine_args = ["xattr", "-r", "-d", "com.apple.quarantine", str(path)] if is_dir else ["xattr", "-d", "com.apple.quarantine", str(path)]
-    run(quarantine_args, check=False)
-
-    # Clear all extended attributes (detritus, FinderInfo, etc.)
-    clear_args = ["xattr", "-c", "-r", str(path)] if is_dir else ["xattr", "-c", str(path)]
-    result = run(clear_args, check=False)
-
-    if result.returncode == 0:
-        print(f"[OK] Quarantine and extended attributes removed from {path.name}")
-    else:
-        # Check if com.apple.quarantine is still present
-        check_result = run(["xattr", "-p", "com.apple.quarantine", str(path)], check=False)
-        if check_result.returncode != 0:
-            print(f"[OK] No quarantine attribute found on {path.name} (already clean)")
-        else:
-            print(f"[WARN] Notice: Could not remove all attributes on {path.name}: {result.stderr.strip() or 'unknown'}")
+def sign_development_bundle(path: Path) -> None:
+    run(["codesign", "--force", "--deep", "--sign", "-", str(path)])
 
 
-def sign_bundle(path: Path) -> None:
-    remove_quarantine(path)
-    result = run(["codesign", "--force", "--deep", "--sign", "-", str(path)], check=False)
-    remove_quarantine(path)
+def nested_code_paths(app_path: Path) -> list[Path]:
+    """Return signable nested code from deepest path to shallowest path."""
+    candidates: set[Path] = set()
+    for path in app_path.rglob("*"):
+        if path.is_symlink():
+            continue
+        if path.is_dir() and path.suffix in {".framework", ".app", ".xpc"} or path.is_file() and (
+            path.suffix.lower() in {".dylib", ".so"}
+            or os.access(path, os.X_OK)
+        ) and run(["lipo", "-archs", str(path)], check=False).returncode == 0:
+            candidates.add(path)
+    candidates.discard(app_path)
+    return sorted(candidates, key=lambda value: len(value.parts), reverse=True)
+
+
+def sign_direct_bundle(app_path: Path, identity: str) -> None:
+    """Sign nested code first, then the app with hardened runtime and timestamps."""
+    common = [
+        "codesign",
+        "--force",
+        "--options",
+        "runtime",
+        "--timestamp",
+        "--sign",
+        identity,
+    ]
+    for path in nested_code_paths(app_path):
+        run([*common, str(path)])
+    run([*common, str(app_path)])
+    run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app_path)])
+
+
+def notarize(path: Path, profile: str, log_name: str, *, staple: bool = True) -> None:
+    """Submit an artifact, require acceptance, then staple and validate it."""
+    result = run(
+        [
+            "xcrun",
+            "notarytool",
+            "submit",
+            str(path),
+            "--keychain-profile",
+            profile,
+            "--wait",
+            "--output-format",
+            "json",
+        ],
+        check=False,
+    )
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    log_path = OUTPUT_ROOT / log_name
+    log_path.write_text(
+        result.stdout + (f"\n{result.stderr}" if result.stderr else ""),
+        encoding="utf-8",
+    )
     if result.returncode != 0:
-        print(f"[WARN] Codesign failed (return code {result.returncode}); continuing without signature")
+        raise SystemExit(f"Notarization command failed; see {log_path}")
+    try:
+        response = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Notarization returned invalid JSON; see {log_path}") from exc
+    submission_id = str(response.get("id", "unknown"))
+    if response.get("status") != "Accepted":
+        if submission_id != "unknown":
+            diagnostic = run([
+                "xcrun", "notarytool", "log", submission_id,
+                "--keychain-profile", profile,
+            ], check=False)
+            log_path.with_suffix(".diagnostic.json").write_text(
+                diagnostic.stdout or diagnostic.stderr, encoding="utf-8"
+            )
+        raise SystemExit(
+            f"Notarization was not accepted (submission {submission_id}); see {log_path}"
+        )
+    print(f"Notarization accepted: {submission_id}")
+    if staple:
+        run(["xcrun", "stapler", "staple", str(path)])
+        run(["xcrun", "stapler", "validate", str(path)])
 
 
 def architecture_suffix(builder: str) -> str:
@@ -552,33 +631,45 @@ def create_distribution(
     app_name: str,
     arch_suffix: str,
     skip_dmg: bool,
+    distribution: str = "development",
+    signing_identity: str = "",
+    notary_profile: str = "",
 ) -> tuple[Path, Path]:
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     file_stem = safe_executable_name(app_name)
     zip_path = OUTPUT_ROOT / f"{file_stem}-macOS-{arch_suffix}.app.zip"
     dmg_path = OUTPUT_ROOT / f"{file_stem}-macOS-{arch_suffix}.dmg"
     print("Creating distribution packages:")
-    print(f"Creating ZIP archive: {zip_path.name}")
-    run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(app_path), str(zip_path)])
-    remove_quarantine(zip_path)
-    write_checksum(zip_path)
     if skip_dmg:
+        print(f"Creating ZIP archive: {zip_path.name}")
+        run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(app_path), str(zip_path)])
+        write_checksum(zip_path)
         return zip_path, dmg_path
 
     staging = MACOS_ROOT / "staging" / "dmg"
     staging.mkdir(parents=True, exist_ok=True)
     staged_app = staging / app_path.name
-    shutil.copytree(app_path, staged_app)
-    remove_quarantine(staged_app)
+    shutil.copytree(app_path, staged_app, symlinks=True)
     (staging / "Applications").symlink_to("/Applications")
     print(f"Creating DMG: {dmg_path.name}")
     run(["hdiutil", "create", "-volname", app_name, "-srcfolder", str(staging), "-ov", "-format", "UDZO", str(dmg_path)])
-    print("Code signing and quarantine removal:")
-    try:
-        sign_bundle(dmg_path)
-    except Exception as exc:
-        print(f"[WARN] DMG codesign error: {exc}")
-    print()
+    if distribution == "direct":
+        run(
+            [
+                "codesign",
+                "--force",
+                "--timestamp",
+                "--sign",
+                signing_identity,
+                str(dmg_path),
+            ]
+        )
+        run(["codesign", "--verify", "--verbose=2", str(dmg_path)])
+        notarize(dmg_path, notary_profile, "notarization-dmg.json")
+        run(["spctl", "--assess", "--type", "open", "--context", "context:primary-signature", "--verbose=2", str(dmg_path)])
+    print(f"Creating ZIP archive: {zip_path.name}")
+    run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(app_path), str(zip_path)])
+    write_checksum(zip_path)
     write_checksum(dmg_path)
     return zip_path, dmg_path
 
@@ -588,23 +679,24 @@ def main() -> int:
     args = parse_args()
     builder_engine = args.builder.lower()
     validate_environment(builder_engine)
-    if builder_engine == "nuitka":
-        if importlib.util.find_spec("nuitka") is None and shutil.which("nuitka") is None:
-            print(
-                "Nuitka is not installed. Run: "
-                "python3 -m pip install nuitka zstandard",
-                file=sys.stderr,
-            )
-            return 3
+    validate_direct_distribution(args)
+    if args.distribution == "direct":
+        args.onedir = True
+    if (builder_engine == "nuitka" and importlib.util.find_spec("nuitka") is None
+        and shutil.which("nuitka") is None):
+        print(
+            "Nuitka is not installed. Run: python3 -m pip install nuitka zstandard",
+            file=sys.stderr,
+        )
+        return 3
 
     payload = embedded_payload(args)
     app_name = str(payload["app_name"])
     wrapper_version = str(payload["wrapper_version"] or "1.0.0")
+    print(f"Embedding wrapper version {wrapper_version} (builder: {builder_engine}).")
     bundle_id = os.getenv("APP_BUNDLE_ID", DEFAULT_BUNDLE_ID).strip() or DEFAULT_BUNDLE_ID
 
     clean_previous_builds()
-    if not args.skip_quarantine_strip:
-        strip_source_quarantine()
     icon = resolve_icon(args)
 
     original_content = EMBEDDED_CONFIG_PATH.read_text(encoding="utf-8")
@@ -622,14 +714,34 @@ def main() -> int:
 
     app_path = locate_app_bundle(app_name)
     configure_bundle(app_path, bundle_id, wrapper_version)
-    print(f"\nCode signing and quarantine removal:")
-    try:
-        sign_bundle(app_path)
-    except Exception as exc:
-        print(f"[WARN] Codesign error: {exc}")
-    print()
+    validate_bundle_architectures(app_path, builder_engine)
+    if args.distribution == "direct":
+        sign_direct_bundle(app_path, args.signing_identity)
+        app_archive = OUTPUT_ROOT / f"{safe_executable_name(app_name)}-notarization.zip"
+        OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+        run(["ditto", "-c", "-k", "--keepParent", str(app_path), str(app_archive)])
+        notarize(
+            app_archive,
+            args.notary_profile,
+            "notarization-app.json",
+            staple=False,
+        )
+        # ZIP tickets cannot be stapled; staple and validate the enclosed app.
+        run(["xcrun", "stapler", "staple", str(app_path)])
+        run(["xcrun", "stapler", "validate", str(app_path)])
+        run(["spctl", "--assess", "--type", "execute", "--verbose=2", str(app_path)])
+    else:
+        sign_development_bundle(app_path)
     run(["lipo", "-info", str(bundle_binary(app_path))])
-    zip_path, dmg_path = create_distribution(app_path, app_name, architecture_suffix(builder_engine), args.skip_dmg)
+    zip_path, dmg_path = create_distribution(
+        app_path,
+        app_name,
+        architecture_suffix(builder_engine),
+        args.skip_dmg,
+        args.distribution,
+        args.signing_identity,
+        args.notary_profile,
+    )
     print(f"Build complete: {dmg_path if not args.skip_dmg else zip_path}")
     return 0
 

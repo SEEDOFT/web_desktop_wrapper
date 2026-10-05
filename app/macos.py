@@ -2,26 +2,54 @@ from __future__ import annotations
 
 import threading
 import webbrowser
+from types import MethodType
 from typing import Any
+from urllib.parse import urlparse
 
 from app.config import AppConfig
 from app.logger import get_logger
-from app.navigation import is_navigation_allowed
+from app.navigation import is_external_url_allowed, is_navigation_allowed
 
 logger = get_logger(__name__)
 
-_MACOS_DELEGATES: list[Any] = []
-_MACOS_MONITORS: list[Any] = []
+_MACOS_DELEGATES: dict[str, Any] = {}
+_MACOS_MONITORS: dict[str, Any] = {}
+_MACOS_PENDING: set[str] = set()
+_MACOS_LOADERS: dict[str, tuple[Any, Any]] = {}
 _MACOS_LOCK = threading.Lock()
+
+
+class _DecisionHandlerOnce:
+    """Ensure a WKNavigationDelegate policy callback is completed at most once."""
+
+    def __init__(self, handler: Any) -> None:
+        self._handler = handler
+        self.called = False
+
+    def __call__(self, policy: Any) -> None:
+        if self.called:
+            logger.warning("Ignoring duplicate macOS navigation policy decision")
+            return
+        self.called = True
+        self._handler(policy)
 
 
 def cleanup_macos_handlers() -> None:
     """Clean up macOS event monitors and delegate references."""
+    try:
+        import Foundation
+        from PyObjCTools import AppHelper
+        foundation_mod: Any = Foundation
+        if not foundation_mod.NSThread.isMainThread():
+            AppHelper.callAfter(cleanup_macos_handlers)
+            return
+    except ImportError:
+        pass
     with _MACOS_LOCK:
         try:
             import AppKit  # type: ignore[import-not-found]
             appkit_mod: Any = AppKit
-            for monitor in _MACOS_MONITORS:
+            for monitor in _MACOS_MONITORS.values():
                 try:
                     appkit_mod.NSEvent.removeMonitor_(monitor)
                 except Exception as e:
@@ -30,25 +58,106 @@ def cleanup_macos_handlers() -> None:
             pass
         _MACOS_MONITORS.clear()
         _MACOS_DELEGATES.clear()
+        _MACOS_PENDING.clear()
+        for browser_view, original_loader in _MACOS_LOADERS.values():
+            try:
+                browser_view.load_url = original_loader
+            except Exception as e:
+                logger.debug("Failed to restore macOS URL loader: %s", e)
+        _MACOS_LOADERS.clear()
     logger.debug("Cleaned up macOS native delegates and monitors")
+
+
+def _install_versioned_url_loader(
+    browser_view: Any,
+    config: AppConfig,
+    foundation: Any,
+    app_helper: Any,
+) -> bool:
+    """Attach the version header to wrapper-initiated approved URL loads."""
+    handler_key = str(browser_view.pywebview_window.uid)
+    with _MACOS_LOCK:
+        if handler_key in _MACOS_LOADERS:
+            return True
+
+    original_loader = browser_view.load_url
+
+    def load_url(instance: Any, url: str) -> None:
+        parsed = urlparse(url)
+        if (
+            not config.wrapper_version
+            or parsed.scheme.lower() not in {"http", "https"}
+            or not is_navigation_allowed(url, config)
+        ):
+            original_loader(url)
+            return
+
+        def load() -> None:
+            page_url = foundation.NSURL.URLWithString_(instance.quote(url))
+            request = foundation.NSMutableURLRequest.requestWithURL_(page_url)
+            request.setValue_forHTTPHeaderField_(
+                config.wrapper_version,
+                "X-Wrapper-Version",
+            )
+            instance.webview.loadRequest_(request)
+
+        instance.url = url
+        app_helper.callAfter(load)
+
+    browser_view.load_url = MethodType(load_url, browser_view)
+    with _MACOS_LOCK:
+        _MACOS_LOADERS[handler_key] = (browser_view, original_loader)
+    logger.info(
+        "macOS initial request header configured for wrapper version %s",
+        config.wrapper_version,
+    )
+    return True
+
+
+def _copy_request_with_version_header(request: Any, version: str) -> Any:
+    """Preserve a native request and change only its wrapper version header."""
+    mutable_request = request.mutableCopy()
+    mutable_request.setValue_forHTTPHeaderField_(version, "X-Wrapper-Version")
+    return mutable_request
 
 
 def configure_macos_webview(window: Any, config: AppConfig) -> None:
     """Install an allowlisting WKNavigationDelegate and keyboard shortcuts."""
     import AppKit  # type: ignore[import-not-found]
-    import WebKit  # type: ignore[import-not-found]
+    import Foundation  # type: ignore[import-not-found]
     import objc  # type: ignore[import-not-found]
-    from Foundation import NSObject  # type: ignore[import-not-found]
+    import WebKit  # type: ignore[import-not-found]
+    from Foundation import NSObject, NSThread  # type: ignore[import-not-found]
+    from PyObjCTools import AppHelper  # type: ignore[import-not-found]
     from webview.platforms.cocoa import BrowserView  # type: ignore[import-not-found]
 
     appkit_mod: Any = AppKit
     webkit_mod: Any = WebKit
-    objc_mod: Any = objc
+
+    handler_key = str(window.uid)
+    if not NSThread.isMainThread():
+        with _MACOS_LOCK:
+            if handler_key in _MACOS_PENDING or handler_key in _MACOS_DELEGATES:
+                return
+            _MACOS_PENDING.add(handler_key)
+
+        def configure_on_main_thread() -> None:
+            with _MACOS_LOCK:
+                _MACOS_PENDING.discard(handler_key)
+            configure_macos_webview(window, config)
+
+        AppHelper.callAfter(configure_on_main_thread)
+        return
 
     browser_view = BrowserView.instances.get(window.uid)
     if browser_view is None:
         raise RuntimeError("Unable to locate the native WKWebView instance.")
     webview = browser_view.webview
+    _install_versioned_url_loader(browser_view, config, Foundation, AppHelper)
+    with _MACOS_LOCK:
+        if handler_key in _MACOS_DELEGATES:
+            logger.debug("macOS handlers already configured for window %s", handler_key)
+            return
     original_delegate = webview.navigationDelegate()
 
     class NavigationDelegate(NSObject):
@@ -74,72 +183,62 @@ def configure_macos_webview(window: Any, config: AppConfig) -> None:
             action: Any,
             handler: Any,
         ) -> None:
-            request = action.request()
-            destination = str(request.URL().absoluteString() or "")
-            http_method = str(request.HTTPMethod() or "GET").upper()
-            original_headers = dict(request.allHTTPHeaderFields() or {})
-            has_wrapper = "X-Wrapper-Version" in original_headers
-            has_handled = "X-Handled" in original_headers
-            logger.debug(
-                "NavigationDelegate: %s %s | has_wrapper=%s has_handled=%s allowed=%s headers=%s",
-                http_method, destination[:120], has_wrapper, has_handled,
-                (not destination or is_navigation_allowed(destination, config)),
-                list(original_headers.keys()),
-            )
-            if not destination or is_navigation_allowed(destination, config):
-                # Inject X-Wrapper-Version on GET requests that don't have it yet.
-                # NEVER intercept POST — WebKit returns None for HTTPBody() in
-                # navigation policy decisions, so rebuilding strips the form
-                # body (CSRF _token) causing 419 Session Expired.
-                if (
-                    config.wrapper_version
-                    and http_method == "GET"
-                    and not has_wrapper
-                    and not has_handled
-                    and str(request.URL()) != "about:blank"
-                ):
-                    try:
-                        import Foundation as foundation_mod  # type: ignore[import-not-found]
-                        url = request.URL()
-                        new_request = foundation_mod.NSMutableURLRequest.requestWithURL_(url)  # type: ignore[attr-defined]
-                        new_request.setHTTPMethod_("GET")
-                        # Copy all original headers + add ours
-                        new_headers = dict(original_headers)
-                        new_headers["X-Wrapper-Version"] = config.wrapper_version
-                        new_headers["X-Handled"] = "true"
-                        new_request.setAllHTTPHeaderFields_(
-                            AppKit.NSDictionary({k: str(v) for k, v in new_headers.items()})  # type: ignore[attr-defined]
+            decision = _DecisionHandlerOnce(handler)
+            allow_policy = getattr(WebKit, "WKNavigationActionPolicyAllow", 1)
+            try:
+                request = action.request()
+                destination = str(request.URL().absoluteString() or "")
+                http_method = str(request.HTTPMethod() or "GET").upper()
+                original_headers = dict(request.allHTTPHeaderFields() or {})
+                allowed = not destination or is_navigation_allowed(destination, config)
+                logger.debug(
+                    "NavigationDelegate: method=%s allowed=%s headers=%s body=%s stream=%s",
+                    http_method,
+                    allowed,
+                    list(original_headers.keys()),
+                    request.HTTPBody() is not None,
+                    request.HTTPBodyStream() is not None,
+                )
+                if allowed:
+                    parsed_destination = urlparse(destination)
+                    if (
+                        config.wrapper_version
+                        and parsed_destination.scheme.lower() in {"http", "https"}
+                        and "X-Wrapper-Version" not in original_headers
+                    ):
+                        mutable_request = _copy_request_with_version_header(
+                            request,
+                            config.wrapper_version,
                         )
-                        new_request.setHTTPShouldHandleCookies_(request.HTTPShouldHandleCookies())
-                        # Cancel original, load new GET request with header
-                        logger.debug("NavigationDelegate: CANCEL+RELOAD %s with X-Wrapper-Version", destination[:120])
-                        handler(getattr(WebKit, "WKNavigationActionPolicyCancel", 0))
-                        wk_webview.loadRequest_(new_request)
+                        decision(getattr(WebKit, "WKNavigationActionPolicyCancel", 0))
+                        wk_webview.loadRequest_(mutable_request)
                         return
-                    except Exception as e:
-                        logger.debug(
-                            "Failed to inject X-Wrapper-Version in NavigationDelegate: %s", e
-                        )
-                        # Fall through to allow original request
-
-                # Allow: already has header, POST, about:blank, or injection failed
-                logger.debug("NavigationDelegate: ALLOW (forwarding to delegate) %s %s", http_method, destination[:120])
-                if self._delegate and hasattr(
-                    self._delegate,
-                    "webView_decidePolicyForNavigationAction_decisionHandler_",
-                ):
-                    self._delegate.webView_decidePolicyForNavigationAction_decisionHandler_(
-                        wk_webview,
-                        action,
-                        handler,
+                    logger.debug(
+                        "NavigationDelegate: forwarding allowed %s navigation",
+                        http_method,
                     )
-                else:
-                    handler(getattr(WebKit, "WKNavigationActionPolicyAllow", 1))
-                return
+                    if self._delegate and hasattr(
+                        self._delegate,
+                        "webView_decidePolicyForNavigationAction_decisionHandler_",
+                    ):
+                        self._delegate.webView_decidePolicyForNavigationAction_decisionHandler_(
+                            wk_webview,
+                            action,
+                            decision,
+                        )
+                    else:
+                        decision(allow_policy)
+                    return
 
-            handler(getattr(WebKit, "WKNavigationActionPolicyCancel", 0))
-            if config.open_external_links:
-                webbrowser.open(destination, new=2)
+                decision(getattr(WebKit, "WKNavigationActionPolicyCancel", 0))
+                if (
+                    config.open_external_links
+                    and is_external_url_allowed(destination, config)
+                ):
+                    webbrowser.open(destination, new=2)
+            except Exception:
+                logger.exception("macOS navigation policy evaluation failed")
+                decision(getattr(WebKit, "WKNavigationActionPolicyCancel", 0))
 
         def webView_didFailProvisionalNavigation_withError_(
             self,
@@ -225,6 +324,7 @@ def configure_macos_webview(window: Any, config: AppConfig) -> None:
                 "wrapper_version_header.js",
                 WRAPPER_VERSION=config.wrapper_version,
             )
+            header_script += "\n" + get_script("navigation_progress.js")
             if header_script:
                 user_script = webkit_mod.WKUserScript.alloc().initWithSource_injectionTime_forMainFrameOnly_(
                     header_script,
@@ -250,11 +350,7 @@ def configure_macos_webview(window: Any, config: AppConfig) -> None:
 
             if is_error_or_blank and config.web_app_url:
                 try:
-                    import Foundation  # type: ignore[import-not-found]
-                    foundation_mod: Any = Foundation
-                    ns_url = foundation_mod.NSURL.URLWithString_(config.web_app_url)
-                    req = foundation_mod.NSURLRequest.requestWithURL_(ns_url)
-                    webview.loadRequest_(req)
+                    browser_view.load_url(config.web_app_url)
                 except Exception as e:
                     logger.debug("Failed to navigate to web_app_url on Cmd+R: %s", e)
             else:
@@ -305,5 +401,5 @@ def configure_macos_webview(window: Any, config: AppConfig) -> None:
     )
 
     with _MACOS_LOCK:
-        _MACOS_DELEGATES.append(delegate)
-        _MACOS_MONITORS.append(monitor)
+        _MACOS_DELEGATES[handler_key] = delegate
+        _MACOS_MONITORS[handler_key] = monitor

@@ -165,6 +165,7 @@ def write_embedded_config(payload: dict) -> None:
     rendered = repr(payload)
     content = (
         '"""Generated temporarily by tools/build.py."""\n\n'
+        f"ENV_TEXT = {(PROJECT_ROOT / '.env').read_text(encoding='utf-8')!r}\n"
         f"CONFIG = {rendered}\n"
     )
     EMBEDDED_CONFIG_PATH.write_text(content, encoding="utf-8")
@@ -325,14 +326,13 @@ def build() -> int:
                 file=sys.stderr,
             )
             return 3
-    elif builder_engine == "nuitka":
-        if importlib.util.find_spec("nuitka") is None and shutil.which("nuitka") is None:
-            print(
-                "Nuitka is not installed. Run: "
-                "python -m pip install nuitka zstandard",
-                file=sys.stderr,
-            )
-            return 3
+    elif (builder_engine == "nuitka" and importlib.util.find_spec("nuitka") is None
+          and shutil.which("nuitka") is None):
+        print(
+            "Nuitka is not installed. Run: python -m pip install nuitka zstandard",
+            file=sys.stderr,
+        )
+        return 3
 
     env_hosts = [
         host.strip().lower().rstrip(".")

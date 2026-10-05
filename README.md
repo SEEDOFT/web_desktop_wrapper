@@ -32,8 +32,8 @@ A native desktop wrapper for modern web applications powered by **Microsoft Edge
 - **Smooth Startup**: Opens the native window only after the first DOM-ready frame; per-monitor DPI aware.
 - **Isolated Storage**: Dedicated profile directories for cookies, cache, and session persistence.
 - **Hardened Security**: Navigation policies, host allowlists, subdomain controls, DevTools suppression, and custom branded error pages.
-- **Automated Quarantine Stripping**: Automatically cleans `com.apple.quarantine` and Finder metadata from built macOS apps, DMGs, and ZIP archives.
-- **X-Wrapper-Version Header**: Automatically injects an `X-Wrapper-Version` HTTP request header on every network request, enabling the backend to identify and validate the desktop wrapper version.
+- **Signed Mac Releases**: Direct releases use Developer ID signing, hardened runtime, Apple notarization, and stapled tickets.
+- **X-Wrapper-Version Header**: Adds version metadata to approved Windows requests and same-origin JavaScript requests.
 - **Dual Build Engines**: Supports both **PyInstaller** (fast packaging) and **Nuitka** (native C++ compilation for maximum reverse-engineering defense).
 - **External JavaScript Scripts**: All injected browser scripts are standalone `.js` files in `app/scripts/` with full IDE linting, syntax highlighting, and error detection support.
 
@@ -124,8 +124,8 @@ python3 -m pip install -r requirements-macos.txt
 | `ALLOW_DOWNLOADS`             | `false`              | Enable file downloads                                                                 |
 | `START_MAXIMIZED`             | `false`              | Launch window maximized                                                               |
 | `SINGLE_INSTANCE`             | `true`               | Prevent duplicate windows and focus existing active instance                          |
-| `SHOW_SPLASH`                 | `true`               | Full-window animated splash screen on launch (cinematic dissolve)                    |
-| `SPLASH_DURATION`             | `4.5`                | Splash breathing animation hold (seconds); 1.4 s CSS dissolve plays after this       |
+| `SHOW_SPLASH`                 | `true`               | Show branding while the web application loads                                        |
+| `SPLASH_DURATION`             | `4.5`                | Legacy compatibility value; readiness now controls splash dismissal                   |
 | `WINDOW_WIDTH`                | `1280`               | Initial window width in pixels                                                        |
 | `WINDOW_HEIGHT`               | `800`                | Initial window height in pixels                                                       |
 | `PAGE_BACKGROUND_COLOR`       | `#ffffff`            | Hex background color shown before web page loads                                      |
@@ -137,7 +137,7 @@ python3 -m pip install -r requirements-macos.txt
 | `BROWSER_LOCALE`              | *System default*     | Enforced browser language and Accept-Language (e.g. `en-US`, `th-TH`, `vi-VN`)       |
 | `RUN_ON_STARTUP`              | `false`              | Launch application automatically on system startup / login                            |
 | `ALLOW_FILE_DROP`             | `false`              | Permit dragging and dropping external local files to navigate the browser window      |
-| `APP_WRAPPER_VERSION`         | `1.0.0`              | Wrapper version sent in the `X-Wrapper-Version` HTTP request header on every request  |
+| `APP_WRAPPER_VERSION`         | `1.0.0`              | Embedded wrapper version; sent via headers for supported requests and macOS user-agent metadata |
 | `EMBED_WEBVIEW2_RUNTIME`      | `true`               | Embed offline WebView2 runtimes in Windows Setup.exe (`true`) or omit for lightweight installer (`false`) |
 | `BUILDER_ENGINE`              | `pyinstaller`        | Compilation engine: `pyinstaller` (default) or `nuitka` (native C++ compilation)      |
 
@@ -342,7 +342,7 @@ python tools/build_installer.py `
 
 ### 3. Build macOS Universal App & DMG (.app / .dmg / .zip)
 
-Builds a universal macOS application (`arm64` + `x86_64`), signs it with hardened runtime (ad-hoc), automatically strips quarantine/extended attributes from the project and toolchain, and creates ZIP + DMG distribution packages.
+Builds a Universal2 macOS application (`arm64` + `x86_64`) with PyInstaller or a host-architecture app with Nuitka, then creates ZIP and DMG packages. Development builds are ad-hoc signed; direct releases use Developer ID and notarization.
 
 > **Note**: Must be run on macOS (macOS 12 Monterey or later).
 
@@ -417,7 +417,7 @@ python3 -m app
 ```
 Quit with `Cmd+Q` when done.
 
-#### Step 3.6 — Build the Universal .app, ZIP, and DMG
+#### Step 3.6 — Build a development .app, ZIP, and DMG
 ```bash
 # PyInstaller (default — universal2 build, ~30–90 s)
 python3 tools/build_macos.py
@@ -427,12 +427,15 @@ python3 tools/build_macos.py --skip-dmg
 ```
 The script:
 1. Loads `.env` before resolving build defaults, validates its settings, and writes the supported runtime values temporarily to `app/embedded_config.py`.
-2. Strips `com.apple.quarantine` and extended attributes from the project tree and toolchain (Python, `lipo`, `iconutil`, `hdiutil`, `ditto`, `codesign`, `sips`) so downloaded files never trip Gatekeeper mid-build.
-3. Generates a multi-resolution `.icns` from `assets/digi_portrait.jpg` (or landscape fallback).
-4. Compiles the `.app`, patches `Info.plist`, ad-hoc signs with hardened runtime, and removes quarantine.
-5. Creates the ZIP (always) and DMG (unless `--skip-dmg`) with checksums.
+2. Generates a multi-resolution `.icns` from `assets/digi_portrait.jpg` (or landscape fallback).
+3. Compiles the `.app`, validates every bundled architecture, and patches `Info.plist`.
+4. Ad-hoc signs development builds, or performs Developer ID signing and notarization for direct releases.
+5. Creates the ZIP and DMG, then writes checksums after all signing and stapling changes.
 
-The raw `.env` file is deliberately **not** copied into the application bundle. Its supported application settings are embedded in generated Python configuration, so the built app works without `.env` while avoiding distribution of unrelated environment entries. The generated source file is restored after every build, including failed builds.
+The `.env` file is not shipped as a sidecar file. Its complete text and the
+validated runtime configuration are embedded in generated Python code, so the
+built app works without an external `.env`. The generated source file is restored
+after every build, including failed builds.
 
 #### Step 3.7 — Custom build options
 ```bash
@@ -458,9 +461,6 @@ python3 tools/build_macos.py --wrapper-version "2.1.0"
 # Use a custom .icns application icon
 python3 tools/build_macos.py --icon "assets/digi_express.icns"
 
-# Skip stripping quarantine from the project and toolchain
-python3 tools/build_macos.py --skip-quarantine-strip
-
 # Override the bundle identifier (default: com.digiexpress.admin)
 # in .env: APP_BUNDLE_ID=com.example.myapp
 ```
@@ -471,6 +471,47 @@ python3 tools/build_macos.py --skip-quarantine-strip
 - `dist/DIGI Express Admin.app` — the application bundle (open with `open "dist/DIGI Express Admin.app"`)
 - `macos/output/DIGI-Express-Admin-macOS-universal.app.zip` + `.sha256`
 - `macos/output/DIGI-Express-Admin-macOS-universal.dmg` + `.sha256` (unless `--skip-dmg`)
+
+#### Step 3.9 — Create a DMG for other Macs
+
+A public download needs an Apple Developer Program membership and a
+**Developer ID Application** certificate. After enrollment, install the certificate
+and its private key in your login keychain. Confirm the exact identity:
+
+```bash
+security find-identity -v -p codesigning
+```
+
+Create a Keychain profile for Apple's notarization service. Use an app-specific
+password for the Apple ID account:
+
+```bash
+xcrun notarytool store-credentials "digi-notary" \
+  --apple-id "developer@example.com" \
+  --team-id "YOUR_TEAM_ID" \
+  --password "YOUR_APP_SPECIFIC_PASSWORD"
+```
+
+Build, sign, notarize, staple, and verify a Universal2 release:
+
+```bash
+python3 tools/build_macos.py \
+  --distribution direct \
+  --builder pyinstaller \
+  --signing-identity "Developer ID Application: Your Company (YOUR_TEAM_ID)" \
+  --notary-profile "digi-notary"
+```
+
+For a smaller native-architecture release, replace `pyinstaller` with `nuitka`.
+Nuitka output is labeled `arm64` or `x86_64`; create and share both DMGs if you
+need to support both Mac architectures.
+
+The command stops if signing, architecture validation, notarization, stapling,
+or Gatekeeper assessment fails. Submission responses are saved as
+`macos/output/notarization-*.json`. Share the final `.dmg` and its `.sha256`
+file. Recipients open the DMG and drag the app to Applications; no Terminal
+command or Gatekeeper bypass should be required. macOS can show its normal
+first-launch confirmation.
 
 ---
 
@@ -493,7 +534,9 @@ python3 tools/build_macos.py --skip-quarantine-strip
 
 ## X-Wrapper-Version Header
 
-The desktop wrapper automatically injects an `X-Wrapper-Version` HTTP request header on **every** network request made by the embedded browser. This allows the backend to identify, validate, and enforce minimum wrapper versions.
+The desktop wrapper adds `X-Wrapper-Version` to approved native navigation and
+same-origin JavaScript requests. This metadata identifies the wrapper version;
+it is not proof of authentication.
 
 ### How It Works
 
@@ -501,22 +544,60 @@ The desktop wrapper automatically injects an `X-Wrapper-Version` HTTP request he
 |---|---|
 | **Native requests** (Windows) | `CoreWebView2.WebResourceRequested` event attaches the header to all HTTP requests at the network layer |
 | **JavaScript `fetch()` / `XMLHttpRequest`** | Injected user scripts monkey-patch `window.fetch` and `XMLHttpRequest.prototype.open` to add the header |
-| **macOS WKWebView** | `WKUserScript` injected at document start patches `fetch` and `XMLHttpRequest` |
+| **macOS WKWebView** | Approved native navigations are copied and receive only the version header change; a document-start script covers `fetch` and XHR |
+
+On macOS, normal link navigation and native HTML form submission are left to
+WKWebView so website click and submit handlers retain their standard behavior.
+The wrapper adds `X-Wrapper-Version` to every approved native HTTP(S) navigation,
+including the initial page, links, retries, redirects, and form POSTs. On macOS,
+it uses the request's native mutable copy and changes only the version header;
+the original POST body, cookies, method, and request properties stay intact.
+JavaScript `fetch()` and XHR calls also receive the explicit header.
+
+The wrapper displays a top loading indicator on Livewire navigation events and
+normal link/form navigation. It lives outside the page body, survives Livewire
+page swaps, and ignores pointer input so it cannot block website controls.
 
 ### Backend Usage Example
 
-Your backend can read the header to enforce minimum version requirements:
+Compare parsed version numbers
+(string comparisons incorrectly order versions such as `1.0.10` and `1.0.2`):
 
 ```python
-# Flask / Django example
-wrapper_version = request.headers.get("X-Wrapper-Version")
-if wrapper_version and wrapper_version < "2.0.0":
+# Flask example; packaging must be installed on the server
+import re
+from packaging.version import InvalidVersion, Version
+
+match = re.search(r"(?:^|\s)DigiWrapper/([0-9.]+)(?:\s|$)", request.headers.get("User-Agent", ""))
+wrapper_version = request.headers.get("X-Wrapper-Version") or (match.group(1) if match else None)
+try:
+    outdated = wrapper_version is not None and Version(wrapper_version) < Version("1.0.1")
+except InvalidVersion:
+    outdated = True
+if outdated:
     return jsonify({"error": "Please update your desktop application"}), 426
 ```
 
 ### Configuration
 
 Set the version in `.env` or at build time:
+
+Every build embeds the full `.env` text inside the generated configuration module
+and loads it from memory at startup, without an external `.env` file. Explicit
+build arguments override corresponding application settings. Rebuild and install
+the new app after changing settings. All values in `.env` become part of the
+distributed application; embedded values remain recoverable by someone who can
+inspect the running application.
+Nuitka builds use the standard compiler without paid plugins or a Commercial
+license. The embedded `.env` is compiled with the application code; native
+compilation makes source inspection harder but does not encrypt configuration
+values.
+The build log prints the embedded version. For the macOS Nuitka pipeline:
+
+```bash
+bash tools/build_nuitka_all.sh --wrapper-version 1.0.1
+```
+
 ```env
 APP_WRAPPER_VERSION=2.1.0
 ```
@@ -577,13 +658,10 @@ npx pyright
 
 ## Gatekeeper & Quarantine Guide (macOS)
 
-- The build script automatically strips `com.apple.quarantine` and Finder metadata (`xattr -cr`) on the local build machine.
-- Before each build it also strips quarantine from the project tree and the local toolchain (Python interpreter, `lipo`, `iconutil`, `hdiutil`, `ditto`, `codesign`, `sips`), so a repo or dependency downloaded from the internet never trips Gatekeeper mid-build. Use `--skip-quarantine-strip` to disable this.
-- For ad-hoc / internally distributed builds downloaded over the internet, Gatekeeper may flag the file. If prompted on a target Mac, run:
-  ```bash
-  xattr -cr /Applications/"DIGI Express Admin.app"
-  ```
-- For public distribution, sign with an Apple Developer ID certificate and notarize with `xcrun notarytool`.
+- Development builds use an ad-hoc signature and can be blocked when downloaded on another Mac.
+- Direct builds use hardened runtime, a secure timestamp, Developer ID signing, Apple notarization, and stapled tickets.
+- The build does not remove quarantine from the source tree, Python installation, toolchain, or release artifacts.
+- Test the uploaded DMG after downloading it through a browser so Gatekeeper evaluates the same file your users receive.
 
 ---
 

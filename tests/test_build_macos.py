@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,26 +9,41 @@ from unittest.mock import MagicMock, patch
 from tools.build_macos import (
     architecture_suffix,
     load_build_environment,
+    notarize,
     parse_args,
-    remove_quarantine,
     sha256_file,
-    sign_bundle,
-    strip_source_quarantine,
+    sign_direct_bundle,
+    validate_direct_distribution,
     write_checksum,
 )
 
 
 class BuildMacOSTests(unittest.TestCase):
+    def test_embeds_complete_environment_without_sidecar(self) -> None:
+        import tools.build_macos as module
+
+        with tempfile.TemporaryDirectory() as directory:
+            env_path = Path(directory) / ".env"
+            output = Path(directory) / "embedded_config.py"
+            content = '# configuration\nAPP_WRAPPER_VERSION=1.0.1\nCUSTOM_SETTING="hello"\n'
+            env_path.write_text(content, encoding="utf-8")
+            with patch.object(module, "ENV_PATH", env_path), patch.object(module, "EMBEDDED_CONFIG_PATH", output):
+                module.write_embedded_config({"wrapper_version": "1.0.1"})
+            namespace: dict = {}
+            exec(compile(output.read_text(encoding="utf-8"), str(output), "exec"), namespace)
+            self.assertEqual(namespace["ENV_TEXT"], content)
+            self.assertEqual(namespace["CONFIG"]["wrapper_version"], "1.0.1")
+
     def test_parse_args_defaults(self) -> None:
-        with patch.dict("os.environ", {"BUILDER_ENGINE": "pyinstaller", "APP_WRAPPER_VERSION": "1.0.0"}, clear=False):
-            with patch("sys.argv", ["build_macos.py"]):
-                args = parse_args()
+        with patch.dict("os.environ", {"BUILDER_ENGINE": "pyinstaller", "APP_WRAPPER_VERSION": "1.0.0"}, clear=False), patch("sys.argv", ["build_macos.py"]):
+            args = parse_args()
         self.assertFalse(args.skip_dmg)
         self.assertEqual(args.builder, "pyinstaller")
         self.assertFalse(args.debug)
         self.assertFalse(args.onedir)
         self.assertEqual(args.wrapper_version, "1.0.0")
         self.assertEqual(args.allowed_host, [])
+        self.assertEqual(args.distribution, "development")
 
     def test_load_build_environment_supplies_parser_defaults(self) -> None:
         import tools.build_macos as module
@@ -40,15 +54,14 @@ class BuildMacOSTests(unittest.TestCase):
                 "BUILDER_ENGINE=nuitka\nAPP_WRAPPER_VERSION=3.2.1\n",
                 encoding="utf-8",
             )
-            with patch.object(module, "ENV_PATH", env_path):
-                with patch.dict(
-                    "os.environ",
-                    {"BUILDER_ENGINE": "pyinstaller", "APP_WRAPPER_VERSION": "1.0.0"},
-                    clear=False,
-                ):
-                    load_build_environment()
-                    with patch("sys.argv", ["build_macos.py"]):
-                        args = parse_args()
+            with patch.object(module, "ENV_PATH", env_path), patch.dict(
+                "os.environ",
+                {"BUILDER_ENGINE": "pyinstaller", "APP_WRAPPER_VERSION": "1.0.0"},
+                clear=False,
+            ):
+                load_build_environment()
+                with patch("sys.argv", ["build_macos.py"]):
+                    args = parse_args()
 
         self.assertEqual(args.builder, "nuitka")
         self.assertEqual(args.wrapper_version, "3.2.1")
@@ -58,61 +71,22 @@ class BuildMacOSTests(unittest.TestCase):
             args = parse_args()
             self.assertTrue(args.skip_dmg)
 
-    def test_parse_args_skip_quarantine_strip(self) -> None:
-        with patch("sys.argv", ["build_macos.py", "--skip-quarantine-strip"]):
-            args = parse_args()
-            self.assertTrue(args.skip_quarantine_strip)
-
     def test_validate_environment_rejects_non_macos(self) -> None:
         import tools.build_macos as module
 
-        with patch.object(module.platform, "system", return_value="Windows"):
-            with self.assertRaisesRegex(SystemExit, "must be built on macOS"):
-                module.validate_environment("pyinstaller")
+        with patch.object(module.platform, "system", return_value="Windows"), self.assertRaisesRegex(SystemExit, "must be built on macOS"):
+            module.validate_environment("pyinstaller")
 
     def test_validate_environment_reports_missing_modules(self) -> None:
         import tools.build_macos as module
 
-        with patch.object(module.platform, "system", return_value="Darwin"):
-            with patch.object(module.shutil, "which", return_value="/usr/bin/tool"):
-                with patch.object(
-                    module.importlib.util,
-                    "find_spec",
-                    side_effect=lambda name: None if name == "WebKit" else MagicMock(),
-                ):
-                    with self.assertRaisesRegex(SystemExit, "WebKit"):
-                        module.validate_environment("pyinstaller")
-
-    @patch("tools.build_macos.remove_quarantine")
-    @patch("tools.build_macos.shutil.which", return_value=None)
-    def test_strip_source_quarantine_covers_project_and_python(
-        self,
-        mock_which: MagicMock,
-        mock_remove: MagicMock,
-    ) -> None:
-        import tools.build_macos as module
-        with patch.object(module, "PROJECT_ROOT", Path("/project")):
-            with patch.object(module.sys, "executable", "/usr/bin/python3"):
-                with patch.object(Path, "exists", return_value=True):
-                    strip_source_quarantine()
-        calls = [call.args[0] for call in mock_remove.call_args_list]
-        self.assertIn(Path("/project"), calls)
-        self.assertIn(Path("/usr/bin/python3").resolve(), calls)
-        self.assertIn(Path(sys.base_prefix).resolve(), calls)
-
-
-    @patch("tools.build_macos.remove_quarantine")
-    @patch("tools.build_macos.shutil.which", side_effect=lambda name: f"/usr/bin/{name}")
-    def test_strip_source_quarantine_includes_tools(
-        self,
-        mock_which: MagicMock,
-        mock_remove: MagicMock,
-    ) -> None:
-        with patch.object(Path, "exists", return_value=True):
-            strip_source_quarantine()
-        calls = [call.args[0] for call in mock_remove.call_args_list]
-        for tool in ("lipo", "iconutil", "hdiutil", "ditto", "codesign", "xattr", "sips", "nuitka"):
-            self.assertIn(Path(f"/usr/bin/{tool}").resolve(), calls)
+        with (
+            patch.object(module.platform, "system", return_value="Darwin"),
+            patch.object(module.shutil, "which", return_value="/usr/bin/tool"),
+            patch.object(module.importlib.util, "find_spec", side_effect=lambda name: None if name == "WebKit" else MagicMock()),
+            self.assertRaisesRegex(SystemExit, "WebKit"),
+        ):
+            module.validate_environment("pyinstaller")
 
     def test_parse_args_custom_flags(self) -> None:
         with patch(
@@ -135,6 +109,12 @@ class BuildMacOSTests(unittest.TestCase):
                 "--windowed-size",
                 "1440",
                 "900",
+                "--distribution",
+                "direct",
+                "--signing-identity",
+                "Developer ID Application: Example Corp (TEAMID1234)",
+                "--notary-profile",
+                "digi-notary",
             ],
         ):
             args = parse_args()
@@ -147,6 +127,28 @@ class BuildMacOSTests(unittest.TestCase):
             self.assertEqual(args.wrapper_version, "2.1.0")
             self.assertEqual(args.icon, Path("assets/digi_express.icns"))
             self.assertEqual(args.windowed_size, [1440, 900])
+            self.assertEqual(args.distribution, "direct")
+            self.assertEqual(args.notary_profile, "digi-notary")
+
+    def test_direct_distribution_requires_credentials(self) -> None:
+        args = MagicMock(
+            distribution="direct",
+            skip_dmg=False,
+            signing_identity="",
+            notary_profile="",
+        )
+        with self.assertRaisesRegex(SystemExit, "signing-identity"):
+            validate_direct_distribution(args)
+
+    def test_direct_distribution_rejects_non_developer_id_identity(self) -> None:
+        args = MagicMock(
+            distribution="direct",
+            skip_dmg=False,
+            signing_identity="Apple Development: Example",
+            notary_profile="digi-notary",
+        )
+        with self.assertRaisesRegex(SystemExit, "Developer ID Application"):
+            validate_direct_distribution(args)
 
     def test_architecture_suffix(self) -> None:
         self.assertEqual(architecture_suffix("pyinstaller"), "universal")
@@ -169,55 +171,7 @@ class BuildMacOSTests(unittest.TestCase):
             self.assertIn("test_artifact.bin", content)
 
     @patch("tools.build_macos.run")
-    def test_remove_quarantine_directory(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=["xattr"],
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
-        with tempfile.TemporaryDirectory() as temp_dir:
-            app_dir = Path(temp_dir) / "Test.app"
-            app_dir.mkdir()
-
-            remove_quarantine(app_dir)
-
-            self.assertEqual(mock_run.call_count, 2)
-            mock_run.assert_any_call(
-                ["xattr", "-r", "-d", "com.apple.quarantine", str(app_dir)],
-                check=False,
-            )
-            mock_run.assert_any_call(
-                ["xattr", "-c", "-r", str(app_dir)],
-                check=False,
-            )
-
-    @patch("tools.build_macos.run")
-    def test_remove_quarantine_single_file(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=["xattr"],
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
-        with tempfile.TemporaryDirectory() as temp_dir:
-            file_path = Path(temp_dir) / "Test.dmg"
-            file_path.write_text("dummy")
-
-            remove_quarantine(file_path)
-
-            self.assertEqual(mock_run.call_count, 2)
-            mock_run.assert_any_call(
-                ["xattr", "-d", "com.apple.quarantine", str(file_path)],
-                check=False,
-            )
-            mock_run.assert_any_call(
-                ["xattr", "-c", str(file_path)],
-                check=False,
-            )
-
-    @patch("tools.build_macos.run")
-    def test_sign_bundle_clears_quarantine_before_and_after(self, mock_run: MagicMock) -> None:
+    def test_direct_signing_signs_nested_code_before_app(self, mock_run: MagicMock) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
             args=["codesign"],
             returncode=0,
@@ -227,14 +181,36 @@ class BuildMacOSTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             app_path = Path(temp_dir) / "Test.app"
             app_path.mkdir()
+            nested = app_path / "Contents" / "Frameworks" / "sample.dylib"
+            nested.parent.mkdir(parents=True)
+            nested.write_bytes(b"binary")
+            identity = "Developer ID Application: Example Corp (TEAMID1234)"
+            with patch("tools.build_macos.os.access", return_value=False):
+                sign_direct_bundle(app_path, identity)
 
-            with patch("tools.build_macos.remove_quarantine") as mock_quarantine:
-                sign_bundle(app_path)
-                self.assertEqual(mock_quarantine.call_count, 2)
-                mock_run.assert_called_once_with(
-                    ["codesign", "--force", "--deep", "--sign", "-", str(app_path)],
-                    check=False,
-                )
+            calls = [call.args[0] for call in mock_run.call_args_list]
+            codesign_calls = [call for call in calls if call[0] == "codesign"]
+            self.assertIn(str(nested), codesign_calls[0])
+            self.assertIn(str(app_path), codesign_calls[1])
+            self.assertEqual(codesign_calls[2][:3], ["codesign", "--verify", "--deep"])
+
+    @patch("tools.build_macos.run")
+    def test_notarization_rejection_is_fatal_and_logged(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["xcrun"],
+            returncode=0,
+            stdout='{"id":"submission-1","status":"Invalid"}',
+            stderr="",
+        )
+        import tools.build_macos as module
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact = Path(temp_dir) / "Test.dmg"
+            artifact.write_bytes(b"dmg")
+            with patch.object(module, "OUTPUT_ROOT", Path(temp_dir)):
+                with self.assertRaisesRegex(SystemExit, "submission-1"):
+                    notarize(artifact, "profile", "notarization.json")
+                self.assertTrue((Path(temp_dir) / "notarization.json").is_file())
 
 
 if __name__ == "__main__":

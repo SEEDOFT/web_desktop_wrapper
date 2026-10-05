@@ -9,7 +9,7 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
-from typing import Any, Callable, Literal, cast
+from typing import Any, Literal, cast
 
 try:
     from System import EventArgs  # type: ignore
@@ -28,10 +28,27 @@ from app.constants import (
     SWIPE_THRESHOLD_PIXELS,
 )
 from app.logger import get_logger
-from app.navigation import is_navigation_allowed
+from app.navigation import is_external_url_allowed, is_navigation_allowed
 from app.platforms import browser_backend, persistent_storage_path, renderer_name
+from app.scripts_loader import get_script
 
 logger = get_logger(__name__)
+
+
+def _attach_wrapper_version_header(request: Any, config: AppConfig) -> None:
+    """Add version metadata to an approved native web request."""
+    try:
+        url = str(getattr(request, "url", "") or "")
+        headers = getattr(request, "headers", None)
+        if (
+            config.wrapper_version
+            and isinstance(headers, dict)
+            and url.startswith(("http://", "https://"))
+            and is_navigation_allowed(url, config)
+        ):
+            headers["X-Wrapper-Version"] = config.wrapper_version
+    except Exception as e:
+        logger.debug("Failed to set X-Wrapper-Version header in request_sent: %s", e)
 
 # Type aliases for improved clarity and type checking
 NavigationAction = Literal[
@@ -82,8 +99,6 @@ def _cleanup_native_handlers() -> None:
     with _NATIVE_HANDLERS_LOCK:
         _NATIVE_HANDLERS.clear()
     logger.debug("Native event handlers cleaned up")
-
-from app.scripts_loader import get_script
 
 
 def _get_swipe_navigation_script() -> str:
@@ -148,8 +163,8 @@ def _open_find_dialog(core_webview: Any) -> None:
             return
         options: Any = create_options()
         if options is not None:
-            setattr(options, "FindTerm", "")
-            setattr(options, "SuppressDefaultFindDialog", False)
+            options.FindTerm = ""
+            options.SuppressDefaultFindDialog = False
             find.StartAsync(options)
     except Exception as e:
         logger.debug("Failed to open find dialog with StartAsync: %s", e)
@@ -372,6 +387,7 @@ def _show_first_frame(
     window: webview.Window,
     ready: threading.Event,
     config: AppConfig,
+    splash_window: webview.Window | None = None,
 ) -> None:
     """Reveal the main window once the first page load completes."""
     if ready.is_set():
@@ -381,50 +397,27 @@ def _show_first_frame(
     window.show()
     if config.start_maximized:
         window.maximize()
+    if splash_window is not None:
+        try:
+            splash_window.destroy()
+        except Exception as exc:
+            logger.debug("Failed to close splash window: %s", exc)
 
 
 def _startup_watchdog(
     window: webview.Window,
     ready: threading.Event,
     config: AppConfig,
+    splash_window: webview.Window | None = None,
 ) -> None:
     """Avoid leaving the application invisible if a server hangs before DOM ready."""
     if ready.wait(timeout=15):
         return
 
-    _show_first_frame(window, ready, config)
-
-
-def _splash_transition(
-    window: webview.Window,
-    config: AppConfig,
-) -> None:
-    """Run in a background thread when splash is enabled.
-
-    The main window is already visible with the splash HTML as its initial
-    content.  This function:
-      1. Holds the splash for ``config.splash_duration`` seconds so the
-         breathing animation plays at its intended pace.
-      2. Triggers the CSS dissolve animation (opacity → 0, scale → 0.96,
-         blur → 18 px) over 1.2 s.
-      3. Navigates the *same* window to the real web application URL.
-    Because everything happens inside a single window there is no secondary
-    window, no background flash, and no coordination gap — identical to how
-    Once Human transitions from its loading screen to gameplay.
-    """
-    time.sleep(config.splash_duration)
-
-    # Trigger the CSS dissolve class
-    try:
-        window.evaluate_js("window.fadeOut && window.fadeOut();")
-    except Exception as e:
-        logger.debug("Splash fadeOut JS failed: %s", e)
-
-    # Let the CSS dissolve animation play (1.4 s transition duration)
-    time.sleep(1.4)
-
-    # Navigate the same window to the actual web application
-    window.load_url(config.web_app_url)
+    window.load_html(_safe_error_html(
+        config, "The application took too long to load. Check your connection and retry."
+    ))
+    _show_first_frame(window, ready, config, splash_window)
 
 
 def _webview2_controller(native_control: Any) -> Any:
@@ -480,7 +473,8 @@ def _apply_window_icon(native_form: Any, app_icon: str) -> None:
         add_reference = getattr(clr, "AddReference", None)
         if callable(add_reference):
             add_reference("System.Drawing")
-        from System.Drawing import Icon as SystemIcon  # type: ignore[import-not-found,import-untyped]
+        drawing = importlib.import_module("System.Drawing")
+        SystemIcon = drawing.Icon
         native_form.Icon = SystemIcon(os.path.abspath(app_icon))
     except Exception as e:
         logger.warning("Failed to set application icon: %s", e)
@@ -785,19 +779,18 @@ def _configure_native_webview(
         # If a reload is triggered while showing an error page, redirect to the main web app
         if error_state.get("active") and (
             not destination or destination == "about:blank" or destination.startswith("data:")
-        ):
-            if config.web_app_url and native_control.CoreWebView2 is not None:
-                args.Cancel = True
-                invoke_on_ui_thread(
-                    lambda: native_control.CoreWebView2.Navigate(config.web_app_url)
-                )
-                return
+        ) and config.web_app_url and native_control.CoreWebView2 is not None:
+            args.Cancel = True
+            invoke_on_ui_thread(
+                lambda: native_control.CoreWebView2.Navigate(config.web_app_url)
+            )
+            return
 
         if not destination or is_navigation_allowed(destination, config):
             return
 
         args.Cancel = True
-        if config.open_external_links:
+        if config.open_external_links and is_external_url_allowed(destination, config):
             webbrowser.open(destination, new=2)
 
     # System Tray Integration
@@ -832,7 +825,7 @@ def _configure_native_webview(
         # Custom User-Agent configuration
         if config.user_agent and hasattr(settings, "UserAgent"):
             try:
-                setattr(settings, "UserAgent", config.user_agent)
+                settings.UserAgent = config.user_agent
             except Exception as e:
                 logger.debug("Failed to set custom User-Agent: %s", e)
 
@@ -840,10 +833,7 @@ def _configure_native_webview(
         if config.wrapper_version and hasattr(core, "AddWebResourceRequestedFilter"):
             try:
                 edgechromium = importlib.import_module("webview.platforms.edgechromium")
-                context_filter = getattr(
-                    edgechromium,
-                    "CoreWebView2WebResourceContext",
-                ).All
+                context_filter = edgechromium.CoreWebView2WebResourceContext.All
             except Exception:
                 context_filter = 0
 
@@ -853,7 +843,8 @@ def _configure_native_webview(
                 def _on_web_resource_requested(sender: Any, args: Any) -> None:
                     del sender
                     try:
-                        args.Request.Headers.SetHeader("X-Wrapper-Version", config.wrapper_version)
+                        if is_navigation_allowed(str(args.Request.Uri), config):
+                            args.Request.Headers.SetHeader("X-Wrapper-Version", config.wrapper_version)
                     except Exception as exc:
                         logger.debug("Failed to set X-Wrapper-Version header: %s", exc)
 
@@ -870,6 +861,7 @@ def _configure_native_webview(
                     "wrapper_version_header.js",
                     WRAPPER_VERSION=config.wrapper_version,
                 )
+                header_script += "\n" + get_script("navigation_progress.js")
                 if header_script:
                     core.AddScriptToExecuteOnDocumentCreatedAsync(header_script)
             except Exception as e:
@@ -1123,12 +1115,9 @@ def run_browser(config: AppConfig) -> int:
             logger.warning("Failed to generate splash HTML: %s", e)
             use_splash = False
 
+    splash_window: webview.Window | None = None
     if use_splash and splash_html:
-        # Splash mode: window opens immediately with splash HTML content.
-        # The dark background_color matches the splash CSS so there is zero
-        # visual discontinuity between the native window chrome and the
-        # rendered HTML content.
-        window = webview.create_window(
+        splash_window = webview.create_window(
             title=config.app_name,
             html=splash_html,
             width=config.window_width,
@@ -1143,26 +1132,21 @@ def run_browser(config: AppConfig) -> int:
             draggable=False,
             confirm_close=False,
         )
-        # Window is already visible; mark ready so _show_first_frame is a
-        # no-op if it ever gets called by the loaded event after navigation.
-        ready.set()
-    else:
-        # Direct mode: window starts hidden, shown on first web page load.
-        window = webview.create_window(
-            title=config.app_name,
-            url=config.web_app_url,
-            width=config.window_width,
-            height=config.window_height,
-            min_size=(800, 600),
-            resizable=True,
-            hidden=True,
-            maximized=config.start_maximized,
-            background_color=config.page_background_color,
-            text_select=True,
-            zoomable=False,
-            draggable=False,
-            confirm_close=False,
-        )
+    window = webview.create_window(
+        title=config.app_name,
+        url=config.web_app_url,
+        width=config.window_width,
+        height=config.window_height,
+        min_size=(800, 600),
+        resizable=True,
+        hidden=True,
+        maximized=config.start_maximized,
+        background_color=config.page_background_color,
+        text_select=True,
+        zoomable=False,
+        draggable=False,
+        confirm_close=False,
+    )
 
     # ── event wiring (shared by both modes) ─────────────────────────────
     window_any = cast(Any, window)
@@ -1175,14 +1159,9 @@ def run_browser(config: AppConfig) -> int:
     )
 
     if config.wrapper_version and backend == "edgechromium":
-        def _attach_request_version_header(request: Any) -> None:
-            try:
-                if hasattr(request, "headers") and isinstance(request.headers, dict):
-                    request.headers["X-Wrapper-Version"] = config.wrapper_version
-            except Exception as e:
-                logger.debug("Failed to set X-Wrapper-Version header in request_sent: %s", e)
-
-        window_events.request_sent += _attach_request_version_header
+        window_events.request_sent += (
+            lambda request: _attach_wrapper_version_header(request, config)
+        )
 
     if backend == "edgechromium":
         window_events.before_show += (
@@ -1195,19 +1174,13 @@ def run_browser(config: AppConfig) -> int:
             lambda window: configure_macos_webview(window, config)
         )
 
-    if not use_splash:
-        # Direct mode: reveal the window after the first successful load.
-        window_events.loaded += (
-            lambda window: _show_first_frame(window, ready, config)
-        )
+    window_events.loaded += (
+        lambda window: _show_first_frame(window, ready, config, splash_window)
+    )
 
     # ── determine startup function ──────────────────────────────────────
-    if use_splash:
-        startup_func = _splash_transition
-        startup_args = (window, config)
-    else:
-        startup_func = _startup_watchdog
-        startup_args = (window, ready, config)
+    startup_func = _startup_watchdog
+    startup_args = (window, ready, config, splash_window)
 
     storage_path = _storage_path(config)
 
@@ -1222,6 +1195,11 @@ def run_browser(config: AppConfig) -> int:
         )
     except Exception as e:
         logger.error("WebView2 initialization failed: %s", e)
+        if splash_window is not None:
+            try:
+                splash_window.destroy()
+            except Exception:
+                pass
         try:
             cast(Any, window).load_html(
                 _safe_error_html(
@@ -1239,4 +1217,3 @@ def run_browser(config: AppConfig) -> int:
     # Clean up event handlers on normal exit
     _cleanup_all_handlers()
     return 0
-

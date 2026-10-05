@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+import importlib.util
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +13,7 @@ class AutostartTests(unittest.TestCase):
         result = sync_autostart("Test App", "Test Org", True)
         self.assertFalse(result)
 
+    @unittest.skipUnless(importlib.util.find_spec("winreg"), "Windows-only registry API")
     @patch("sys.platform", "win32")
     def test_set_autostart_windows_guard(self) -> None:
         # Should gracefully return boolean without raising unhandled exceptions

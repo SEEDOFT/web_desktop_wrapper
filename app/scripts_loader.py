@@ -14,7 +14,8 @@ def _resolve_scripts_dir() -> Path:
     """Resolve the directory containing standalone JavaScript files."""
     # PyInstaller unpacked temp directory
     if hasattr(sys, "_MEIPASS"):
-        meipass = Path(getattr(sys, "_MEIPASS"))
+        runtime_sys: Any = sys
+        meipass = Path(runtime_sys._MEIPASS)
         for candidate in (
             meipass / "app" / "scripts",
             meipass / "scripts",

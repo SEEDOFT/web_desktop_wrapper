@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import os
 import shutil
-import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -134,6 +133,7 @@ def python_environment(python: Path, architecture: str, builder: str = "pyinstal
         cwd=PROJECT_ROOT,
         env=environment,
         capture_output=True,
+        check=False,
     )
     if check.returncode == 0:
         return environment
@@ -150,6 +150,7 @@ def python_environment(python: Path, architecture: str, builder: str = "pyinstal
                 cwd=PROJECT_ROOT,
                 env=environment,
                 capture_output=True,
+                check=False,
             )
             if retry.returncode == 0:
                 return environment

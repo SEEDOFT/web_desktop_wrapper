@@ -36,7 +36,7 @@ class ErrorPageContentTests(unittest.TestCase):
             },
             clear=True,
         ):
-            return AppConfig.load()
+            return AppConfig.load(packaged=False)
 
     def test_error_page_is_branded(self) -> None:
         html = _navigation_error_html(self._config())

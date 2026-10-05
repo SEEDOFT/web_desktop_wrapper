@@ -18,6 +18,15 @@ class ScriptsLoaderTests(unittest.TestCase):
         self.assertIn("X-Wrapper-Version", script)
         self.assertIn("origFetch", script)
         self.assertIn("XMLHttpRequest.prototype.open", script)
+        self.assertIn("window.__wdwWrapperVersionHeaderInstalled", script)
+        self.assertNotIn('addEventListener("submit"', script)
+        self.assertNotIn("preventDefault", script)
+        self.assertNotIn("XMLHttpRequest.prototype.send", script)
+        self.assertIn("window.location.origin", script)
+        self.assertIn("Object.assign", script)
+        self.assertIn("wdw-navigation-progress-style", script)
+        self.assertIn("livewire:navigated", script)
+        self.assertIn("z-index: 2147483647", script)
 
     def test_load_prevent_file_drop_script(self) -> None:
         script = get_script("prevent_file_drop.js")

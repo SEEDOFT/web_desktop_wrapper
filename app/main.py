@@ -6,7 +6,7 @@ import sys
 from typing import Any
 
 from app.browser import run_browser
-from app.config import AppConfig, ConfigError
+from app.config import AppConfig, ConfigError, configuration_source
 from app.logger import get_logger
 from app.platforms import runtime_check_required
 from app.runtime import find_webview2_runtime
@@ -56,6 +56,12 @@ def run() -> int:
         except ConfigError as exc:
             _message_box("Configuration error", str(exc))
             return 2
+
+        logger.info(
+            "Starting wrapper version %s using %s",
+            config.wrapper_version,
+            configuration_source(),
+        )
 
         # Single-instance enforcement
         lock = None

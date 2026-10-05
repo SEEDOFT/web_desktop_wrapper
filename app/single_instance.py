@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -41,11 +40,9 @@ class SingleInstanceLock:
                 except Exception as e:
                     logger.debug("Failed to release file lock: %s", e)
                 self._handle = None
-            if self._lock_path and self._lock_path.exists():
-                try:
-                    self._lock_path.unlink()
-                except Exception as e:
-                    logger.debug("Failed to remove lock file: %s", e)
+            # Keep the path in place. Unlinking after unlock creates an inode race:
+            # a new process can lock the old file while another process creates and
+            # locks a replacement at the same path.
 
 
 def activate_existing_window(app_title: str) -> None:
@@ -67,17 +64,12 @@ def activate_existing_window(app_title: str) -> None:
             logger.debug("Failed to activate existing Windows window: %s", e)
     elif sys.platform == "darwin":
         try:
-            import subprocess
-            # Use AppleScript to activate application by name
-            subprocess.run(
-                [
-                    "osascript",
-                    "-e",
-                    f'tell application "{app_title}" to activate',
-                ],
-                check=False,
-                capture_output=True,
-            )
+            import AppKit
+            appkit_mod: Any = AppKit
+            for application in appkit_mod.NSWorkspace.sharedWorkspace().runningApplications():
+                if str(application.localizedName()) == app_title:
+                    application.activateWithOptions_(2)
+                    break
             logger.info("Activated existing macOS application '%s'", app_title)
         except Exception as e:
             logger.debug("Failed to activate existing macOS app: %s", e)

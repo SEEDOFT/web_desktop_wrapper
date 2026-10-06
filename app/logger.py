@@ -9,7 +9,25 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+from app.runtime_mode import is_packaged
+
+
+class SanitizedFormatter(logging.Formatter):
+    """Redact URL details and common credential fields, including tracebacks."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = super().format(record)
+        message = re.sub(r"https?://[^\s<>]+", "[url]", message)
+        message = re.sub(r"(?i)\bauthorization\s*[:=]\s*(?:Bearer|Basic)\s+[^\s,;]+", "authorization=[redacted]", message)
+        return re.sub(
+            r"(?i)[\"']?\b(password|token|secret|authorization|cookie|api[_-]?key)[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+            r"\1=[redacted]", message,
+        )
 
 
 def _get_log_level() -> int:
@@ -19,7 +37,7 @@ def _get_log_level() -> int:
         return getattr(logging, log_level_env)
 
     # In packaged/frozen apps, default to WARNING to reduce console noise
-    if getattr(sys, "frozen", False):
+    if is_packaged():
         return logging.WARNING
     return logging.DEBUG
 
@@ -28,7 +46,7 @@ def _configure_root_logger() -> None:
     """Configure the root logger with appropriate handlers and formatting."""
     log_level = _get_log_level()
 
-    formatter = logging.Formatter(
+    formatter = SanitizedFormatter(
         fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -44,6 +62,24 @@ def _configure_root_logger() -> None:
         root_logger.removeHandler(handler)
 
     root_logger.addHandler(console_handler)
+
+
+def configure_release_logging(directory: Path) -> None:
+    """Add bounded, sanitized release logs without changing console verbosity."""
+    root = logging.getLogger()
+    if any(isinstance(handler, RotatingFileHandler) for handler in root.handlers):
+        return
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            directory / "wrapper.log", maxBytes=1024 * 1024, backupCount=3, encoding="utf-8"
+        )
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(SanitizedFormatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+        root.setLevel(min(root.level, logging.INFO))
+        root.addHandler(handler)
+    except OSError:
+        root.warning("Unable to create release diagnostic log")
 
 
 # Initialize logging on module import

@@ -22,6 +22,7 @@ from app.config import AppConfig
 from tools.build import (
     normalize_local_url,
     safe_executable_name,
+    staged_application,
     validate_url,
 )
 
@@ -380,6 +381,7 @@ def build_pyinstaller(
     app_name: str,
     bundle_id: str,
     environment: dict[str, str],
+    source_root: Path = PROJECT_ROOT,
 ) -> None:
     command = [
         sys.executable,
@@ -398,7 +400,7 @@ def build_pyinstaller(
         "--target-architecture",
         "universal2",
         "--paths",
-        str(PROJECT_ROOT),
+        str(source_root),
         "--hidden-import",
         "webview.platforms.cocoa",
         "--collect-all",
@@ -422,7 +424,7 @@ def build_pyinstaller(
         "--onedir" if args.onedir else "--onefile",
     ]
     command.extend(["--icon", str(icon)])
-    command.append(str(PROJECT_ROOT / "run.py"))
+    command.append(str(source_root / "run.py"))
     run(command, environment=environment)
 
 
@@ -433,6 +435,7 @@ def build_nuitka(
     bundle_id: str,
     wrapper_version: str,
     environment: dict[str, str],
+    source_root: Path = PROJECT_ROOT,
 ) -> None:
     console_mode = "force" if args.debug else "disable"
     command = [
@@ -461,7 +464,7 @@ def build_nuitka(
         f"--include-data-dir={PROJECT_ROOT / 'app' / 'scripts'}=app/scripts",
         f"--macos-app-icon={icon}",
     ]
-    command.append(str(PROJECT_ROOT / "run.py"))
+    command.append(str(source_root / "run.py"))
     run(command, environment=environment)
 
 
@@ -699,18 +702,14 @@ def main() -> int:
     clean_previous_builds()
     icon = resolve_icon(args)
 
-    original_content = EMBEDDED_CONFIG_PATH.read_text(encoding="utf-8")
     environment = os.environ.copy()
     environment["MACOSX_DEPLOYMENT_TARGET"] = "12.0"
-    try:
-        write_embedded_config(payload)
+    with staged_application(PROJECT_ROOT, payload) as source_root:
         print(f"Building application with {builder_engine.capitalize()}...")
         if builder_engine == "nuitka":
-            build_nuitka(args, icon, app_name, bundle_id, wrapper_version, environment)
+            build_nuitka(args, icon, app_name, bundle_id, wrapper_version, environment, source_root)
         else:
-            build_pyinstaller(args, icon, app_name, bundle_id, environment)
-    finally:
-        EMBEDDED_CONFIG_PATH.write_text(original_content, encoding="utf-8")
+            build_pyinstaller(args, icon, app_name, bundle_id, environment, source_root)
 
     app_path = locate_app_bundle(app_name)
     configure_bundle(app_path, bundle_id, wrapper_version)

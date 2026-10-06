@@ -7,8 +7,8 @@ from typing import Any
 
 from app.browser import run_browser
 from app.config import AppConfig, ConfigError, configuration_source
-from app.logger import get_logger
-from app.platforms import runtime_check_required
+from app.logger import configure_release_logging, get_logger
+from app.platforms import persistent_storage_path, runtime_check_required
 from app.runtime import find_webview2_runtime
 from app.single_instance import acquire_single_instance
 
@@ -57,6 +57,10 @@ def run() -> int:
             _message_box("Configuration error", str(exc))
             return 2
 
+        if config.production_mode:
+            configure_release_logging(
+                persistent_storage_path(config.organization_name, config.profile_name).parent / "Logs"
+            )
         logger.info(
             "Starting wrapper version %s using %s",
             config.wrapper_version,

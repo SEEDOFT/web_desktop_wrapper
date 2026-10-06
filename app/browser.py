@@ -409,14 +409,15 @@ def _startup_watchdog(
     ready: threading.Event,
     config: AppConfig,
     splash_window: webview.Window | None = None,
+    timeout_seconds: float = 15,
 ) -> None:
     """Avoid leaving the application invisible if a server hangs before DOM ready."""
-    if ready.wait(timeout=15):
+    if ready.wait(timeout=timeout_seconds):
         return
 
     window.load_html(_safe_error_html(
         config, "The application took too long to load. Check your connection and retry."
-    ))
+    ), base_uri="about:blank")
     _show_first_frame(window, ready, config, splash_window)
 
 
@@ -549,12 +550,21 @@ def _attach_error_page_handler(
     config: AppConfig,
     invoke_on_ui_thread: Any,
     error_state: dict[str, bool],
+    window: Any = None,
 ) -> None:
     """Replace WebView2's error page with a branded page that hides the URL."""
     def navigation_completed(sender: Any, args: Any) -> None:
         del sender
         is_success = bool(getattr(args, "IsSuccess", True))
-        source = str(getattr(core, "Source", "") or "").lower()
+        try:
+            method = "finish" if is_success else "cancel"
+            core.ExecuteScriptAsync(
+                f"window.__wdwNavigationProgress && window.__wdwNavigationProgress.{method}()"
+            )
+        except Exception:
+            logger.debug("Unable to complete WebView2 navigation progress")
+        source_url = str(getattr(core, "Source", "") or "")
+        source = source_url.lower()
 
         if is_success:
             # Only reset error state if we successfully loaded a real remote/local URL,
@@ -577,6 +587,8 @@ def _attach_error_page_handler(
                 logger.debug("Failed to focus native control: %s", e)
 
         error_state["active"] = True
+        if window is not None and source.startswith(("http://", "https://")) and is_navigation_allowed(source_url, config):
+            window._wdw_retry_url = source_url
         invoke_on_ui_thread(show_error_page)
 
     try:
@@ -877,7 +889,7 @@ def _configure_native_webview(
                 logger.debug("Failed to attach drag-drop hardening script: %s", e)
 
         _attach_swipe_navigation(core, invoke_on_ui_thread)
-        _attach_error_page_handler(core, native_control, config, invoke_on_ui_thread, error_state)
+        _attach_error_page_handler(core, native_control, config, invoke_on_ui_thread, error_state, native_window)
 
         # Download Management & Completion Notifications
         try:
@@ -924,6 +936,53 @@ def _renderer_initialized(
     return None
 
 
+class _UnreachablePageActions:
+    """Expose recovery actions only while the local error document is active."""
+
+    def __init__(self, window: Any, config: AppConfig) -> None:
+        self.window = window
+        self.config = config
+
+    def _is_error_page(self) -> bool:
+        return self.window.evaluate_js(
+            "!!document.getElementById('wdw-unreachable-page') && "
+            "(location.protocol === 'about:' || location.protocol === 'data:')"
+        ) is True
+
+    def refresh_unreachable_page(self) -> str:
+        if not self._is_error_page():
+            return ""
+        destination = getattr(self.window, "_wdw_retry_url", self.config.web_app_url)
+        if not is_navigation_allowed(destination, self.config):
+            destination = self.config.web_app_url
+        return destination
+
+    def close_unreachable_page(self) -> bool:
+        if not self._is_error_page():
+            return False
+        threading.Thread(target=self._close_after_acknowledgment, daemon=True).start()
+        return True
+
+    def _close_after_acknowledgment(self) -> None:
+        # Let pywebview return its API response before destroying the document.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self.window.events.closed.is_set():
+                return
+            try:
+                acknowledged = self.window.evaluate_js(
+                    "window.__wdwErrorCloseAcknowledged === true && "
+                    "!!document.getElementById('wdw-unreachable-page') && "
+                    "(location.protocol === 'about:' || location.protocol === 'data:')"
+                )
+                if acknowledged is True:
+                    self.window.destroy()
+                    return
+            except Exception:
+                return
+            time.sleep(0.05)
+
+
 def _safe_error_html(config: AppConfig, body: str) -> str:
     title = html.escape(config.app_name)
     background = config.page_background_color
@@ -960,6 +1019,11 @@ h1 {{
     margin: 0 0 12px;
     font-weight: 700;
 }}
+.app-name {{ font-size: 14px; opacity: .65; margin-bottom: 16px; }}
+.actions {{ display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }}
+.retry-btn.close-btn {{ background: transparent; color: inherit; border: 1px solid currentColor; box-shadow: none; }}
+.retry-btn.close-btn:hover {{ background: rgba(128, 128, 128, .15); }}
+button:focus-visible {{ outline: 3px solid #38bdf8; outline-offset: 3px; }}
 p {{
     line-height: 1.6;
     margin: 0 0 20px;
@@ -1006,13 +1070,36 @@ kbd {{
 }}
 </style>
 <script>
-function retryConnection() {{
+async function retryConnection() {{
     var btn = document.getElementById('retry-btn');
+    if (btn.disabled) return;
     if (btn) {{
         btn.textContent = 'Reconnecting...';
         btn.disabled = true;
     }}
-    window.location.reload();
+    try {{
+        if (!window.pywebview || !window.pywebview.api) throw new Error();
+        var destination = await window.pywebview.api.refresh_unreachable_page();
+        if (typeof destination !== 'string' || !destination) throw new Error();
+        window.location.assign(destination);
+    }} catch (e) {{
+        btn.disabled = false;
+        btn.textContent = 'Refresh';
+        document.getElementById('connection-status').textContent = 'Unable to refresh. Please try again.';
+    }}
+}}
+async function closeApplication() {{
+    var btn = document.getElementById('close-btn');
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try {{
+        if (!window.pywebview || !window.pywebview.api ||
+            await window.pywebview.api.close_unreachable_page() !== true) throw new Error();
+        window.__wdwErrorCloseAcknowledged = true;
+    }} catch (e) {{
+        btn.disabled = false;
+        document.getElementById('connection-status').textContent = 'Please close this window using its close button.';
+    }}
 }}
 window.addEventListener('keydown', function(e) {{
     // F5 (116) or Ctrl+R / Cmd+R (82)
@@ -1021,18 +1108,20 @@ window.addEventListener('keydown', function(e) {{
         retryConnection();
     }}
 }});
-window.addEventListener('online', function() {{
-    retryConnection();
-}});
 </script>
 </head>
 <body>
 <main>
-<section>
-<h1>Unable to open {title}</h1>
+<section id="wdw-unreachable-page">
+<div class="app-name">{title}</div>
+<h1>This site can’t be reached</h1>
 <p>{html.escape(body)}</p>
-<button id="retry-btn" class="retry-btn" onclick="retryConnection()">Retry Connection</button>
-<div class="shortcut-hint">Press <kbd>F5</kbd> or <kbd>Ctrl+R</kbd> to retry</div>
+<div class="actions">
+<button id="retry-btn" class="retry-btn" onclick="retryConnection()">Refresh</button>
+<button id="close-btn" class="retry-btn close-btn" onclick="closeApplication()">Close</button>
+</div>
+<p id="connection-status" role="status" aria-live="polite"></p>
+<div class="shortcut-hint">Press <kbd>F5</kbd> or <kbd>Ctrl+R</kbd> / <kbd>Cmd+R</kbd> to refresh</div>
 </section>
 </main>
 </body>
@@ -1150,6 +1239,8 @@ def run_browser(config: AppConfig) -> int:
 
     # ── event wiring (shared by both modes) ─────────────────────────────
     window_any = cast(Any, window)
+    recovery = _UnreachablePageActions(window_any, config)
+    window_any.expose(recovery.refresh_unreachable_page, recovery.close_unreachable_page)
     window_events = window_any.events
 
     backend = browser_backend()
@@ -1205,7 +1296,7 @@ def run_browser(config: AppConfig) -> int:
                 _safe_error_html(
                     config,
                     "The native web renderer failed to initialize.",
-                )
+                ), base_uri="about:blank"
             )
             cast(Any, window).show()
         except Exception as show_error:

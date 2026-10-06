@@ -8,7 +8,10 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -169,6 +172,21 @@ def write_embedded_config(payload: dict) -> None:
         f"CONFIG = {rendered}\n"
     )
     EMBEDDED_CONFIG_PATH.write_text(content, encoding="utf-8")
+
+
+@contextmanager
+def staged_application(project_root: Path, payload: dict) -> Iterator[Path]:
+    """Compile an isolated source copy; never overwrite repository configuration."""
+    with TemporaryDirectory(prefix="webdesktop-build-") as directory:
+        source_root = Path(directory)
+        shutil.copytree(project_root / "app", source_root / "app", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copy2(project_root / "run.py", source_root / "run.py")
+        environment_text = (project_root / ".env").read_text(encoding="utf-8")
+        (source_root / "app" / "embedded_config.py").write_text(
+            '"""Build-generated configuration, including the complete environment."""\n\n'
+            f"ENV_TEXT = {environment_text!r}\nCONFIG = {payload!r}\n", encoding="utf-8"
+        )
+        yield source_root
 
 
 def executable_output_path(name: str, onedir: bool) -> Path:
@@ -376,9 +394,9 @@ def build() -> int:
         "allow_file_drop": parse_bool(os.getenv("ALLOW_FILE_DROP"), False),
         "wrapper_version": str(args.wrapper_version or "1.0.0").strip(),
     }
-    original_content = EMBEDDED_CONFIG_PATH.read_text(encoding="utf-8")
+    staging = ExitStack()
     try:
-        write_embedded_config(payload)
+        source_root = staging.enter_context(staged_application(PROJECT_ROOT, payload))
 
         if builder_engine == "nuitka":
             command = [
@@ -422,7 +440,7 @@ def build() -> int:
             if not args.onedir:
                 command.append("--onefile")
 
-            command.append(str(PROJECT_ROOT / "run.py"))
+            command.append(str(source_root / "run.py"))
         else:
             command = [
                 sys.executable,
@@ -437,7 +455,7 @@ def build() -> int:
                 "--name",
                 executable_name,
                 "--paths",
-                str(PROJECT_ROOT),
+                str(source_root),
                 "--hidden-import",
                 "webview.platforms.edgechromium",
                 "--hidden-import",
@@ -470,7 +488,7 @@ def build() -> int:
             if icon_path is not None:
                 command.extend(["--icon", str(icon_path.resolve())])
 
-            command.append(str(PROJECT_ROOT / "run.py"))
+            command.append(str(source_root / "run.py"))
 
         remove_previous_output(executable_name, args.onedir)
         print(f"Building application with {builder_engine.capitalize()}...")
@@ -479,7 +497,7 @@ def build() -> int:
         print(f"Build failed with exit code {exc.returncode}.", file=sys.stderr)
         return exc.returncode or 1
     finally:
-        EMBEDDED_CONFIG_PATH.write_text(original_content, encoding="utf-8")
+        staging.close()
 
     output = executable_output_path(executable_name, args.onedir)
     print(f"Build completed: {output}")

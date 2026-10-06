@@ -121,6 +121,33 @@ def _copy_request_with_version_header(request: Any, version: str) -> Any:
     return mutable_request
 
 
+def _versioned_main_frame_request(action: Any, config: AppConfig) -> Any:
+    """Never replay a child frame or popup into the main WKWebView."""
+    frame = action.targetFrame()
+    if frame is None or not frame.isMainFrame():
+        return None
+    request = action.request()
+    destination = str(request.URL().absoluteString() or "")
+    if (not config.wrapper_version or urlparse(destination).scheme.lower() not in {"http", "https"}
+        or not is_navigation_allowed(destination, config)):
+        return None
+    headers = dict(request.allHTTPHeaderFields() or {})
+    versions = [str(value) for name, value in headers.items() if str(name).lower() == "x-wrapper-version"]
+    if versions and all(value == config.wrapper_version for value in versions):
+        return None
+    return _copy_request_with_version_header(request, config.wrapper_version)
+
+
+def _complete_navigation_progress(webview: Any, *, failed: bool = False) -> None:
+    method = "cancel" if failed else "finish"
+    try:
+        webview.evaluateJavaScript_completionHandler_(
+            f"window.__wdwNavigationProgress && window.__wdwNavigationProgress.{method}()", None
+        )
+    except Exception:
+        logger.debug("Unable to complete navigation progress")
+
+
 def configure_macos_webview(window: Any, config: AppConfig) -> None:
     """Install an allowlisting WKNavigationDelegate and keyboard shortcuts."""
     import AppKit  # type: ignore[import-not-found]
@@ -200,16 +227,11 @@ def configure_macos_webview(window: Any, config: AppConfig) -> None:
                     request.HTTPBodyStream() is not None,
                 )
                 if allowed:
-                    parsed_destination = urlparse(destination)
-                    if (
-                        config.wrapper_version
-                        and parsed_destination.scheme.lower() in {"http", "https"}
-                        and "X-Wrapper-Version" not in original_headers
-                    ):
-                        mutable_request = _copy_request_with_version_header(
-                            request,
-                            config.wrapper_version,
-                        )
+                    frame = action.targetFrame()
+                    if frame is not None and frame.isMainFrame() and urlparse(destination).scheme.lower() in {"http", "https"}:
+                        window._wdw_retry_url = destination if http_method == "GET" else config.web_app_url
+                    mutable_request = _versioned_main_frame_request(action, config)
+                    if mutable_request is not None:
                         decision(getattr(WebKit, "WKNavigationActionPolicyCancel", 0))
                         wk_webview.loadRequest_(mutable_request)
                         return
@@ -231,6 +253,7 @@ def configure_macos_webview(window: Any, config: AppConfig) -> None:
                     return
 
                 decision(getattr(WebKit, "WKNavigationActionPolicyCancel", 0))
+                _complete_navigation_progress(wk_webview, failed=True)
                 if (
                     config.open_external_links
                     and is_external_url_allowed(destination, config)
@@ -239,6 +262,12 @@ def configure_macos_webview(window: Any, config: AppConfig) -> None:
             except Exception:
                 logger.exception("macOS navigation policy evaluation failed")
                 decision(getattr(WebKit, "WKNavigationActionPolicyCancel", 0))
+                _complete_navigation_progress(wk_webview, failed=True)
+
+        def webView_didFinishNavigation_(self, wk_webview: Any, navigation: Any) -> None:
+            _complete_navigation_progress(wk_webview)
+            if self._delegate and hasattr(self._delegate, "webView_didFinishNavigation_"):
+                self._delegate.webView_didFinishNavigation_(wk_webview, navigation)
 
         def webView_didFailProvisionalNavigation_withError_(
             self,
@@ -253,6 +282,8 @@ def configure_macos_webview(window: Any, config: AppConfig) -> None:
             except Exception:
                 pass
             logger.debug("webView_didFailProvisionalNavigation: error_code=%s (%s)", error_code, error)
+            if error_code != 102:
+                _complete_navigation_progress(wk_webview, failed=True)
             # -999 is NSURLErrorCancelled, 102 is WebKitErrorFrameLoadInterruptedByPolicyChange
             if error_code not in (-999, 102) and error_code is not None:
                 from app.browser import _safe_error_html
@@ -285,6 +316,8 @@ def configure_macos_webview(window: Any, config: AppConfig) -> None:
             except Exception:
                 pass
             logger.debug("webView_didFailNavigation: error_code=%s (%s)", error_code, error)
+            if error_code != 102:
+                _complete_navigation_progress(wk_webview, failed=True)
             if error_code not in (-999, 102) and error_code is not None:
                 from app.browser import _safe_error_html
                 error_html = _safe_error_html(
@@ -350,7 +383,7 @@ def configure_macos_webview(window: Any, config: AppConfig) -> None:
 
             if is_error_or_blank and config.web_app_url:
                 try:
-                    browser_view.load_url(config.web_app_url)
+                    browser_view.load_url(getattr(window, "_wdw_retry_url", config.web_app_url))
                 except Exception as e:
                     logger.debug("Failed to navigate to web_app_url on Cmd+R: %s", e)
             else:

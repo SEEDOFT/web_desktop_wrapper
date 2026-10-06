@@ -44,6 +44,10 @@ function fixture() {
             for (const handler of documentEvents.get(name) || []) handler(event);
             while (microtasks.length) microtasks.shift()();
         },
+        fire(name, event = {}) {
+            for (const handler of documentEvents.get(name) || []) handler(event);
+        },
+        flushMicrotasks() { while (microtasks.length) microtasks.shift()(); },
         finishTimers() {
             for (const [id, entry] of [...timers]) {
                 if (entry.delay < 60000) { timers.delete(id); entry.handler(); }
@@ -63,6 +67,24 @@ test('Livewire navigation displays the bar immediately and hides on completion',
     f.emit('livewire:navigated');
     f.finishTimers();
     assert.equal(bar.style.display, 'none');
+});
+
+test('completion before the queued start cannot leave the loading bar stuck', () => {
+    const f = fixture();
+    f.fire('livewire:navigate');
+    f.fire('livewire:navigated');
+    f.flushMicrotasks();
+    assert.equal(f.children.length, 0);
+});
+
+test('failed and canceled navigation clears loading immediately', () => {
+    const f = fixture();
+    f.emit('livewire:navigate');
+    f.emit('livewire:navigate-error');
+    assert.equal(f.children[0].style.display, 'none');
+    f.emit('livewire:navigate');
+    f.window.__wdwNavigationProgress.cancel();
+    assert.equal(f.children[0].style.display, 'none');
 });
 
 test('canceled navigation does not leave a visible bar; repeated injection has one listener', () => {

@@ -10,7 +10,7 @@ from app.config import AppConfig, ConfigError, configuration_source
 class AppConfigTests(unittest.TestCase):
     def test_stale_embedded_config_does_not_mark_source_as_packaged(self) -> None:
         with patch("app.config.embedded_config.CONFIG", {"wrapper_version": "0.9.0"}), patch(
-            "app.config.sys.frozen", False, create=True
+            "app.runtime_mode.sys.frozen", False, create=True
         ):
             self.assertEqual(configuration_source(), "development .env")
 

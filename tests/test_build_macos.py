@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import subprocess
 import tempfile
 import unittest
@@ -19,6 +20,22 @@ from tools.build_macos import (
 
 
 class BuildMacOSTests(unittest.TestCase):
+    def test_both_build_engines_use_isolated_entrypoint(self) -> None:
+        import tools.build_macos as module
+
+        source = Path("/tmp/isolated-source")
+        args = argparse.Namespace(debug=False, onedir=True)
+        with patch.object(module, "run") as execute:
+            module.build_pyinstaller(args, Path("icon.icns"), "App", "test.app", {}, source)
+            command = execute.call_args.args[0]
+            self.assertEqual(command[-1], str(source / "run.py"))
+            self.assertEqual(command[command.index("--paths") + 1], str(source))
+            module.build_nuitka(args, Path("icon.icns"), "App", "test.app", "1.0.1", {}, source)
+            command = execute.call_args.args[0]
+            self.assertEqual(command[-1], str(source / "run.py"))
+            self.assertIn("--include-package=app", command)
+            self.assertNotIn("--enable-plugin=data-hiding", command)
+
     def test_embeds_complete_environment_without_sidecar(self) -> None:
         import tools.build_macos as module
 

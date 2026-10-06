@@ -1,0 +1,20 @@
+# Exact environment used for macOS regression checks (CPython 3.14).
+altgraph==0.17.5
+bottle==0.13.4
+macholib==1.16.4
+Nuitka==4.1.3
+packaging==26.3
+pillow==12.3.0
+proxy_tools==0.1.0
+pyinstaller==6.22.2
+pyinstaller-hooks-contrib==2026.7
+pyobjc-core==11.1
+pyobjc-framework-Cocoa==11.1
+pyobjc-framework-Quartz==11.1
+pyobjc-framework-Security==11.1
+pyobjc-framework-UniformTypeIdentifiers==11.1
+pyobjc-framework-WebKit==11.1
+python-dotenv==1.2.3
+pywebview==6.2.1
+setuptools==84.0.0
+typing_extensions==4.16.0

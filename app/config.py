@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
@@ -22,16 +21,11 @@ from app.config_validators import (
     parse_url_list,
     slugify,
 )
+from app.runtime_mode import is_packaged
 
 
 def _is_frozen() -> bool:
-    return bool(
-        getattr(sys, "frozen", False)
-        or hasattr(sys, "__nuitka_version__")
-        or hasattr(sys, "nuitka_version")
-        or "__compiled__" in globals()
-        or "__compiled__" in sys.modules
-    )
+    return is_packaged()
 
 
 def configuration_source() -> str:

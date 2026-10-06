@@ -5,6 +5,7 @@
     var timer;
     var startedAt = 0;
     var host;
+    var generation = 0;
 
     function mount() {
         if (!document.documentElement) return null;
@@ -54,12 +55,18 @@
         timer = setTimeout(hide, Math.max(0, 180 - (Date.now() - startedAt)));
     }
 
-    window.__wdwNavigationProgress = { start: start, finish: finish };
+    window.__wdwNavigationProgress = { start: start, finish: finish, cancel: hide };
     document.addEventListener("livewire:navigate", function (event) {
-        queueMicrotask(function () { if (!event.defaultPrevented) start(); });
+        var current = ++generation;
+        queueMicrotask(function () {
+            if (current !== generation) return;
+            if (event.defaultPrevented) hide();
+            else start();
+        });
     });
     document.addEventListener("livewire:navigating", start);
-    document.addEventListener("livewire:navigated", finish);
+    document.addEventListener("livewire:navigated", function () { generation++; finish(); });
+    document.addEventListener("livewire:navigate-error", hide);
 
     // Native links/forms also need feedback when they do not use wire:navigate.
     document.addEventListener("click", function (event) {
@@ -77,5 +84,5 @@
         queueMicrotask(function () { if (!event.defaultPrevented) start(); });
     });
     window.addEventListener("pageshow", finish);
-    window.addEventListener("unhandledrejection", finish);
+    window.addEventListener("unhandledrejection", hide);
 })();

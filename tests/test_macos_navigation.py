@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -9,10 +10,52 @@ from app.macos import (
     _copy_request_with_version_header,
     _DecisionHandlerOnce,
     _install_versioned_url_loader,
+    _versioned_main_frame_request,
 )
 
 
 class MacOSNavigationTests(unittest.TestCase):
+    def test_header_matching_is_case_insensitive_and_replaces_stale_versions(self) -> None:
+        request = MagicMock()
+        request.URL.return_value.absoluteString.return_value = "https://portal.example.test/login"
+        frame = SimpleNamespace(isMainFrame=lambda: True)
+        action = SimpleNamespace(targetFrame=lambda: frame, request=lambda: request)
+        for name in ("X-Wrapper-Version", "x-wrapper-version", "X-WRAPPER-VERSION"):
+            request.allHTTPHeaderFields.return_value = {name: "1.0.1"}
+            self.assertIsNone(_versioned_main_frame_request(action, self._config()))
+        request.allHTTPHeaderFields.return_value = {"x-wrapper-version": "1.0.0"}
+        self.assertIs(_versioned_main_frame_request(action, self._config()), request.mutableCopy.return_value)
+
+    def test_child_frames_and_popups_are_not_replayed_in_main_window(self) -> None:
+        request = MagicMock()
+        for frame in (None, SimpleNamespace(isMainFrame=lambda: False)):
+            action = SimpleNamespace(targetFrame=lambda frame=frame: frame, request=lambda: request)
+            self.assertIsNone(_versioned_main_frame_request(action, self._config()))
+        request.mutableCopy.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires native Foundation requests")
+    def test_real_native_copy_preserves_post_and_cookie_properties(self) -> None:
+        from typing import Any
+
+        import Foundation
+
+        native: Any = Foundation
+        body = b"csrf=fixture-token&name=hello%20world"
+        request = native.NSMutableURLRequest.requestWithURL_(
+            native.NSURL.URLWithString_("https://portal.example.test/login")
+        )
+        request.setHTTPMethod_("POST")
+        request.setHTTPBody_(native.NSData.dataWithBytes_length_(body, len(body)))
+        request.setValue_forHTTPHeaderField_("application/x-www-form-urlencoded", "Content-Type")
+        request.setHTTPShouldHandleCookies_(True)
+        copied = _copy_request_with_version_header(request, "1.0.1")
+        self.assertEqual(bytes(copied.HTTPBody()), body)
+        self.assertEqual(copied.HTTPMethod(), "POST")
+        self.assertTrue(copied.HTTPShouldHandleCookies())
+        self.assertEqual(copied.valueForHTTPHeaderField_("Content-Type"), "application/x-www-form-urlencoded")
+        self.assertEqual(copied.valueForHTTPHeaderField_("X-Wrapper-Version"), "1.0.1")
+        self.assertIsNone(request.valueForHTTPHeaderField_("X-Wrapper-Version"))
+
     def test_native_post_copy_only_changes_version_header(self) -> None:
         mutable_request = MagicMock()
         request = MagicMock()

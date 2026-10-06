@@ -41,9 +41,8 @@ fi
 source "${VENV_DIR}/bin/activate"
 
 # Step 3: Install macOS and project dependencies
-echo "[3/4] Installing / updating dependencies from requirements-macos.txt ..."
-pip install --upgrade pip --quiet
-pip install -r requirements-macos.txt --quiet
+echo "[3/4] Installing pinned dependencies from requirements-macos.lock.txt ..."
+python3 -m pip install -r requirements-macos.lock.txt --quiet
 
 # Step 4: Run macOS Nuitka Build
 echo "[4/4] Building standalone macOS application with Nuitka C++ compiler ..."

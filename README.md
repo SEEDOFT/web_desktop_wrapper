@@ -426,16 +426,21 @@ python3 tools/build_macos.py
 python3 tools/build_macos.py --skip-dmg
 ```
 The script:
-1. Loads `.env` before resolving build defaults, validates its settings, and writes the supported runtime values temporarily to `app/embedded_config.py`.
+1. Loads `.env` before resolving build defaults, validates its settings, and embeds the complete environment in an isolated temporary source copy.
 2. Generates a multi-resolution `.icns` from `assets/digi_portrait.jpg` (or landscape fallback).
 3. Compiles the `.app`, validates every bundled architecture, and patches `Info.plist`.
 4. Ad-hoc signs development builds, or performs Developer ID signing and notarization for direct releases.
 5. Creates the ZIP and DMG, then writes checksums after all signing and stapling changes.
 
-The `.env` file is not shipped as a sidecar file. Its complete text and the
-validated runtime configuration are embedded in generated Python code, so the
-built app works without an external `.env`. The generated source file is restored
-after every build, including failed builds.
+The `.env` file is not shipped as a sidecar file. Its complete text and validated
+runtime configuration are embedded in an isolated temporary source copy, so the
+built app works without an external `.env`. Builds never overwrite the repository's
+`app/embedded_config.py`; temporary sources are cleaned on success or failure.
+
+For repeatable macOS dependencies, install `requirements-macos.lock.txt` (the
+tested CPython 3.14 environment). The Nuitka pipeline uses this exact lock file
+and does not automatically upgrade pip. Update the lock deliberately after
+running both the Python suite and the native regression fixture.
 
 #### Step 3.7 — Custom build options
 ```bash
@@ -554,9 +559,22 @@ it uses the request's native mutable copy and changes only the version header;
 the original POST body, cookies, method, and request properties stay intact.
 JavaScript `fetch()` and XHR calls also receive the explicit header.
 
+On macOS, native header replay is restricted to the main frame and compares
+header names case-insensitively. Child frames and popup targets are handed to
+WebKit's native routing, so their requests cannot replace the main document.
+Child frames and parser-loaded resources retain `DigiWrapper/<version>` in their
+user-agent as version metadata; WKWebView has no public per-frame request-header
+injection hook. Popup links handled in the current window subsequently pass
+through the main-frame header policy.
+
 The wrapper displays a top loading indicator on Livewire navigation events and
 normal link/form navigation. It lives outside the page body, survives Livewire
 page swaps, and ignores pointer input so it cannot block website controls.
+Native failures and blocked navigations clear the indicator immediately.
+If the site cannot be reached, the local recovery page offers **Refresh** and
+**Close**. Refresh retries an approved GET destination with the wrapper version
+header; it does not resubmit a failed form POST. Recovery controls are available
+only on the local error document, and technical URLs are not displayed.
 
 ### Backend Usage Example
 
@@ -634,7 +652,34 @@ python -m unittest discover -s tests
 
 # Run static type and lint analysis (via Pyright)
 npx pyright
+
+# Lint Python (install Ruff separately if needed)
+ruff check .
+
+# JavaScript request/header and navigation lifecycle regressions
+node --test tests/navigation_progress.test.cjs tests/wrapper_headers.test.cjs
 ```
+
+On macOS, run the real WKWebView regression fixture:
+
+```bash
+python3 -m tests.wkwebview_smoke
+# Verify the startup timeout screen against a stalled server
+python3 -m tests.wkwebview_smoke --startup-hang
+```
+
+This opens and closes a temporary browser window using a localhost server and
+synthetic data. It checks modal/detail buttons, dropdowns, loading completion and
+cancellation, POST bodies with CSRF/cookies, request headers, iframe and popup
+routing, redirects, and back/forward history. Its Livewire lifecycle checks use
+synthetic events; production Livewire behavior and physical pointer delivery
+still require manual checks. It does not access the DIGI server or build artifacts.
+
+Packaged applications write sanitized, rotating diagnostics to `Logs/wrapper.log`
+beside their WebKit/WebView2 profile directory (four files of up to 1 MiB each).
+Logs record startup version and configuration source; URL details and common
+credential fields are redacted. Console verbosity remains controlled by
+`LOG_LEVEL`, and both PyInstaller and Nuitka are recognized as packaged runtimes.
 
 ---
 

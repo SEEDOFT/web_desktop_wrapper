@@ -1,11 +1,8 @@
-"""Build-generated application configuration.
+"""Runtime configuration placeholder for source development.
 
-The production build temporarily replaces this file with the build-time
-configuration (URL, name, options) as plain values, packages it, and restores
-this placeholder. This configuration is not secret: the values must exist in
-the executable for it to run, and a desktop client cannot hide its network
-destination from DNS, the web server, or the local user. Never place
-credentials, access tokens, passwords, or private keys here.
+Builds replace this module only in their isolated source copy, embedding the
+complete .env text and validated settings there. Repository settings stay empty.
 """
 
+ENV_TEXT = ""
 CONFIG: dict = {}

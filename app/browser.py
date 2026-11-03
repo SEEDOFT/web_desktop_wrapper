@@ -1241,6 +1241,10 @@ def run_browser(config: AppConfig) -> int:
     window_any = cast(Any, window)
     recovery = _UnreachablePageActions(window_any, config)
     window_any.expose(recovery.refresh_unreachable_page, recovery.close_unreachable_page)
+    from app.image_actions import ImageActions
+    image_actions = ImageActions(window_any, config)
+    window_any.expose(image_actions.image_action)
+    window_any.events.closed += image_actions.close
     window_events = window_any.events
 
     backend = browser_backend()

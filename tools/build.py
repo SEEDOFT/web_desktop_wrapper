@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -397,8 +398,22 @@ def build() -> int:
     staging = ExitStack()
     try:
         source_root = staging.enter_context(staged_application(PROJECT_ROOT, payload))
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from app.windows_media import build_share_adapter
+        media_dir = Path(staging.enter_context(TemporaryDirectory(prefix="wrapper-native-media-")))
+        share_adapter = build_share_adapter(media_dir / "WrapperImageShare.dll")
 
         if builder_engine == "nuitka":
+            native_config = media_dir / "media.nuitka-package.config.yml"
+            native_config.write_text(json.dumps([{
+                "module-name": "app",
+                "dlls": [{
+                    "from_filenames": {"relative_path": str(media_dir), "prefixes": ["WrapperImageShare"], "suffixes": ["dll"]},
+                    "dest_path": "media",
+                    "when": "win32",
+                }],
+            }]), encoding="utf-8")
             command = [
                 sys.executable,
                 "-m",
@@ -417,6 +432,7 @@ def build() -> int:
                 "--include-package=webview",
                 f"--include-data-dir={PROJECT_ROOT / 'assets'}=assets",
                 f"--include-data-dir={PROJECT_ROOT / 'app' / 'scripts'}=app/scripts",
+                f"--user-package-configuration-file={native_config}",
             ]
             if sys.platform == "win32":
                 command.extend([
@@ -470,6 +486,8 @@ def build() -> int:
                 "assets;assets" if sys.platform == "win32" else "assets:assets",
                 "--add-data",
                 "app/scripts;app/scripts" if sys.platform == "win32" else "app/scripts:app/scripts",
+                "--add-binary",
+                f"{share_adapter};media",
                 "--exclude-module",
                 "PySide6",
                 "--exclude-module",

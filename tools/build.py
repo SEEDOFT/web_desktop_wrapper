@@ -110,6 +110,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep console window enabled to view stdout/stderr and tracebacks.",
     )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Fast development compilation with Nuitka (disables LTO and builds as standalone directory).",
+    )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Clean compiler intermediate build cache before compiling.",
+    )
+    parser.add_argument(
+        "--arch",
+        choices=["x64", "x86"],
+        default=None,
+        help="Target architecture identifier for intermediate build cache separation (default: auto-detected).",
+    )
     return parser.parse_args()
 
 
@@ -162,10 +178,17 @@ def safe_executable_name(name: str) -> str:
     return normalized
 
 
+def _render_embedded_config(project_root: Path, payload: dict) -> str:
+    env_file = project_root / ".env"
+    environment_text = env_file.read_text(encoding="utf-8") if env_file.is_file() else ""
+    return (
+        '"""Build-generated configuration, including the complete environment."""\n\n'
+        f"ENV_TEXT = {environment_text!r}\nCONFIG = {payload!r}\n"
+    )
+
+
 def write_embedded_config(payload: dict) -> None:
     """Write the build-time configuration into embedded_config.py as plain values."""
-    # repr() emits real Python literals (True/False/None), not JSON's lowercase
-    # true/false/null, so the generated module imports cleanly.
     rendered = repr(payload)
     content = (
         '"""Generated temporarily by tools/build.py."""\n\n'
@@ -190,6 +213,78 @@ def staged_application(project_root: Path, payload: dict) -> Iterator[Path]:
         yield source_root
 
 
+def _sync_tree(src: Path, dst: Path) -> None:
+    """Synchronize source directory tree into destination, preserving untouched files and timestamps."""
+    dst.mkdir(parents=True, exist_ok=True)
+    seen_dest_files: set[Path] = set()
+
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if d != "__pycache__" and not d.endswith(".dist-info")]
+        rel_dir = Path(root).relative_to(src)
+        target_dir = dst / rel_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        for filename in files:
+            if filename.endswith((".pyc", ".pyo")):
+                continue
+            src_file = Path(root) / filename
+            dst_file = target_dir / filename
+            seen_dest_files.add(dst_file.resolve())
+
+            src_bytes = src_file.read_bytes()
+            if dst_file.is_file():
+                try:
+                    if dst_file.stat().st_size == len(src_bytes) and dst_file.read_bytes() == src_bytes:
+                        continue
+                except OSError:
+                    pass
+            dst_file.write_bytes(src_bytes)
+
+    # Remove any files in dst that no longer exist in src
+    for root, dirs, files in os.walk(dst, topdown=False):
+        for filename in files:
+            dst_file = Path(root) / filename
+            if dst_file.resolve() not in seen_dest_files:
+                try:
+                    dst_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        for dirname in dirs:
+            dir_path = Path(root) / dirname
+            if not any(dir_path.iterdir()):
+                try:
+                    dir_path.rmdir()
+                except OSError:
+                    pass
+
+
+def _write_if_changed(path: Path, content: str | bytes) -> bool:
+    """Write content to path only if the file does not exist or differs in content."""
+    data = content.encode("utf-8") if isinstance(content, str) else content
+    if path.is_file():
+        try:
+            if path.stat().st_size == len(data) and path.read_bytes() == data:
+                return False
+        except OSError:
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return True
+
+
+def persistent_staged_application(project_root: Path, payload: dict, stage_root: Path) -> Path:
+    """Stage application in a stable location so compilers can reuse cached objects."""
+    source_root = stage_root / "src"
+    source_root.mkdir(parents=True, exist_ok=True)
+    _sync_tree(project_root / "app", source_root / "app")
+    _write_if_changed(source_root / "run.py", (project_root / "run.py").read_bytes())
+    _write_if_changed(
+        source_root / "app" / "embedded_config.py",
+        _render_embedded_config(project_root, payload),
+    )
+    return source_root
+
+
 def executable_output_path(name: str, onedir: bool) -> Path:
     if onedir:
         return PROJECT_ROOT / "dist" / name
@@ -200,15 +295,17 @@ def executable_output_path(name: str, onedir: bool) -> Path:
 def remove_previous_output(name: str, onedir: bool) -> None:
     """Delete the previous build artifact (file or directory) and its checksum."""
     output = executable_output_path(name, onedir)
-    checksum = output.with_suffix(output.suffix + ".sha256")
-    for path in (output, checksum):
-        try:
-            if path.is_dir():
-                shutil.rmtree(path, ignore_errors=True)
-            elif path.exists():
-                path.unlink(missing_ok=True)
-        except OSError as exc:
-            print(f"Warning: could not remove {path}: {exc}", file=sys.stderr)
+    alt_output = executable_output_path(name, not onedir)
+    for target in (output, alt_output):
+        checksum = target.with_suffix(target.suffix + ".sha256")
+        for path in (target, checksum):
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                elif path.exists():
+                    path.unlink(missing_ok=True)
+            except OSError as exc:
+                print(f"Warning: could not remove {path}: {exc}", file=sys.stderr)
 
 
 def sha256_file(path: Path) -> str:
@@ -217,6 +314,91 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def construct_nuitka_command(
+    *,
+    source_root: Path,
+    executable_name: str,
+    output_dir: Path,
+    report_file: Path | None,
+    native_config: Path | None,
+    icon_path: Path | None,
+    is_onedir: bool,
+    fast_mode: bool,
+    debug_mode: bool,
+    platform: str = sys.platform,
+) -> list[str]:
+    """Construct Nuitka CLI command arguments with speed and modularity optimizations."""
+    command = [
+        sys.executable,
+        "-m",
+        "nuitka",
+        "--standalone",
+        "--assume-yes-for-downloads",
+        "--show-progress",
+        "--disable-plugin=pywebview",
+        "--enable-plugin=no-qt",
+        "--no-deployment-flag=excluded-module-usage",
+        f"--output-dir={output_dir}",
+        f"--output-filename={executable_name}.exe" if platform == "win32" else f"--output-filename={executable_name}",
+        "--include-package=app",
+        "--include-package=dotenv",
+        "--include-module=webview",
+        f"--include-data-dir={PROJECT_ROOT / 'assets'}=assets",
+        f"--include-data-dir={PROJECT_ROOT / 'app' / 'scripts'}=app/scripts",
+    ]
+
+    # Anti-bloat exclusions: do not follow or compile unused GUI frameworks
+    command.extend([
+        "--nofollow-import-to=webview.platforms.gtk",
+        "--nofollow-import-to=webview.platforms.qt",
+        "--nofollow-import-to=webview.platforms.cef",
+        "--nofollow-import-to=webview.platforms.android",
+        "--nofollow-import-to=webview.platforms.mshtml",
+        "--noinclude-default-mode=nofollow",
+    ])
+
+    if report_file is not None:
+        command.append(f"--report={report_file}")
+
+    if native_config is not None:
+        command.append(f"--user-package-configuration-file={native_config}")
+
+    if platform == "win32":
+        command.extend([
+            "--nofollow-import-to=webview.platforms.cocoa",
+            "--nofollow-import-to=AppKit,Foundation,WebKit,objc,PyObjCTools",
+            "--include-module=webview.platforms.winforms",
+            "--include-module=webview.platforms.edgechromium",
+            "--include-module=webview.platforms.win32",
+            "--include-package=clr_loader",
+            "--include-package=pythonnet",
+            f"--windows-console-mode={'force' if debug_mode else 'disable'}",
+        ])
+        if icon_path is not None:
+            command.append(f"--windows-icon-from-ico={icon_path.resolve()}")
+    elif platform == "darwin":
+        command.extend([
+            "--nofollow-import-to=webview.platforms.winforms",
+            "--nofollow-import-to=webview.platforms.edgechromium",
+            "--nofollow-import-to=webview.platforms.win32",
+            "--include-module=webview.platforms.cocoa",
+            "--macos-create-app-bundle",
+        ])
+        if icon_path is not None:
+            command.append(f"--macos-app-icon={icon_path.resolve()}")
+
+    if fast_mode:
+        command.append("--lto=no")
+    else:
+        command.append("--lto=yes")
+
+    if not is_onedir:
+        command.append("--onefile")
+
+    command.append(str(source_root / "run.py"))
+    return command
 
 
 def build() -> int:
@@ -395,16 +577,29 @@ def build() -> int:
         "allow_file_drop": parse_bool(os.getenv("ALLOW_FILE_DROP"), False),
         "wrapper_version": str(args.wrapper_version or "1.0.0").strip(),
     }
+
+    is_onedir = args.onedir or (builder_engine == "nuitka" and args.fast)
+    arch_tag = args.arch or ("x64" if sys.maxsize > 2**32 else "x86")
+    nuitka_dir = PROJECT_ROOT / "build" / "nuitka" / arch_tag
+    nuitka_out_dir = nuitka_dir / "out"
+
+    if args.clean and builder_engine == "nuitka":
+        if nuitka_dir.is_dir():
+            print(f"Cleaning cached Nuitka build directory at: {nuitka_dir}")
+            shutil.rmtree(nuitka_dir, ignore_errors=True)
+
     staging = ExitStack()
     try:
-        source_root = staging.enter_context(staged_application(PROJECT_ROOT, payload))
         if str(PROJECT_ROOT) not in sys.path:
             sys.path.insert(0, str(PROJECT_ROOT))
         from app.windows_media import build_share_adapter
-        media_dir = Path(staging.enter_context(TemporaryDirectory(prefix="wrapper-native-media-")))
-        share_adapter = build_share_adapter(media_dir / "WrapperImageShare.dll")
 
         if builder_engine == "nuitka":
+            source_root = persistent_staged_application(PROJECT_ROOT, payload, nuitka_dir)
+            media_dir = nuitka_dir / "media"
+            media_dir.mkdir(parents=True, exist_ok=True)
+            build_share_adapter(media_dir / "WrapperImageShare.dll")
+
             native_config = media_dir / "media.nuitka-package.config.yml"
             native_config.write_text(json.dumps([{
                 "module-name": "app",
@@ -414,50 +609,27 @@ def build() -> int:
                     "when": "win32",
                 }],
             }]), encoding="utf-8")
-            command = [
-                sys.executable,
-                "-m",
-                "nuitka",
-                "--standalone",
-                "--assume-yes-for-downloads",
-                "--show-progress",
-                "--remove-output",
-                "--disable-plugin=pywebview",
-                "--enable-plugin=no-qt",
-                "--no-deployment-flag=excluded-module-usage",
-                f"--output-dir={PROJECT_ROOT / 'dist'}",
-                f"--output-filename={executable_name}.exe" if sys.platform == "win32" else f"--output-filename={executable_name}",
-                "--include-package=app",
-                "--include-package=dotenv",
-                "--include-package=webview",
-                f"--include-data-dir={PROJECT_ROOT / 'assets'}=assets",
-                f"--include-data-dir={PROJECT_ROOT / 'app' / 'scripts'}=app/scripts",
-                f"--user-package-configuration-file={native_config}",
-            ]
-            if sys.platform == "win32":
-                command.extend([
-                    "--include-module=webview.platforms.winforms",
-                    "--include-module=webview.platforms.edgechromium",
-                    "--include-module=webview.platforms.win32",
-                    "--include-package=clr_loader",
-                    "--include-package=pythonnet",
-                    f"--windows-console-mode={'force' if args.debug else 'disable'}",
-                ])
-                if icon_path is not None:
-                    command.append(f"--windows-icon-from-ico={icon_path.resolve()}")
-            elif sys.platform == "darwin":
-                command.extend([
-                    "--include-module=webview.platforms.cocoa",
-                ])
-                command.append("--macos-create-app-bundle")
-                if icon_path is not None:
-                    command.append(f"--macos-app-icon={icon_path.resolve()}")
 
-            if not args.onedir:
-                command.append("--onefile")
+            nuitka_out_dir.mkdir(parents=True, exist_ok=True)
+            report_file = nuitka_dir / "compilation-report.xml"
 
-            command.append(str(source_root / "run.py"))
+            command = construct_nuitka_command(
+                source_root=source_root,
+                executable_name=executable_name,
+                output_dir=nuitka_out_dir,
+                report_file=report_file,
+                native_config=native_config,
+                icon_path=icon_path,
+                is_onedir=is_onedir,
+                fast_mode=args.fast,
+                debug_mode=args.debug,
+                platform=sys.platform,
+            )
         else:
+            source_root = staging.enter_context(staged_application(PROJECT_ROOT, payload))
+            media_dir = Path(staging.enter_context(TemporaryDirectory(prefix="wrapper-native-media-")))
+            share_adapter = build_share_adapter(media_dir / "WrapperImageShare.dll")
+
             command = [
                 sys.executable,
                 "-m",
@@ -500,7 +672,7 @@ def build() -> int:
                 "gi",
                 "--exclude-module",
                 "kivy",
-                "--onedir" if args.onedir else "--onefile",
+                "--onedir" if is_onedir else "--onefile",
             ]
 
             if icon_path is not None:
@@ -508,16 +680,54 @@ def build() -> int:
 
             command.append(str(source_root / "run.py"))
 
-        remove_previous_output(executable_name, args.onedir)
-        print(f"Building application with {builder_engine.capitalize()}...")
+        remove_previous_output(executable_name, is_onedir)
+        mode_desc = " (Fast dev mode)" if (builder_engine == "nuitka" and args.fast) else ""
+        print(f"Building application with {builder_engine.capitalize()}{mode_desc}...")
         subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+
+        # In Nuitka mode, transfer final product from intermediate nuitka_out_dir to dist/
+        if builder_engine == "nuitka":
+            final_dist = PROJECT_ROOT / "dist"
+            final_dist.mkdir(parents=True, exist_ok=True)
+            if is_onedir:
+                found_dir = None
+                for cand in (
+                    nuitka_out_dir / f"{executable_name}.dist",
+                    nuitka_out_dir / f"{executable_name}.app",
+                    nuitka_out_dir / "run.dist",
+                    nuitka_out_dir / executable_name,
+                ):
+                    if cand.is_dir():
+                        found_dir = cand
+                        break
+                if found_dir is None:
+                    raise FileNotFoundError(f"Nuitka onedir directory not found in {nuitka_out_dir}")
+                dest_dir = final_dist / executable_name
+                if dest_dir.exists():
+                    shutil.rmtree(dest_dir)
+                shutil.copytree(found_dir, dest_dir)
+            else:
+                found_file = None
+                for cand in (
+                    nuitka_out_dir / f"{executable_name}.exe",
+                    nuitka_out_dir / executable_name,
+                    nuitka_out_dir / "run.exe",
+                ):
+                    if cand.is_file():
+                        found_file = cand
+                        break
+                if found_file is None:
+                    raise FileNotFoundError(f"Nuitka standalone executable not found in {nuitka_out_dir}")
+                dest_file = final_dist / f"{executable_name}.exe" if sys.platform == "win32" else final_dist / executable_name
+                shutil.copy2(found_file, dest_file)
+
     except subprocess.CalledProcessError as exc:
         print(f"Build failed with exit code {exc.returncode}.", file=sys.stderr)
         return exc.returncode or 1
     finally:
         staging.close()
 
-    output = executable_output_path(executable_name, args.onedir)
+    output = executable_output_path(executable_name, is_onedir)
     print(f"Build completed: {output}")
 
     if output.is_file():
@@ -526,6 +736,14 @@ def build() -> int:
         checksum_path.write_text(f"{checksum}  {output.name}\n", encoding="utf-8")
         print(f"SHA-256: {checksum}")
         print(f"Checksum file: {checksum_path}")
+    elif output.is_dir():
+        main_exe = output / (f"{executable_name}.exe" if sys.platform == "win32" else executable_name)
+        if main_exe.is_file():
+            checksum = sha256_file(main_exe)
+            checksum_path = output.with_suffix(output.suffix + ".sha256")
+            checksum_path.write_text(f"{checksum}  {output.name}\n", encoding="utf-8")
+            print(f"Main binary SHA-256: {checksum}")
+            print(f"Checksum file: {checksum_path}")
 
     return 0
 

@@ -57,6 +57,22 @@ def parse_args() -> argparse.Namespace:
         help="Compilation engine: pyinstaller (default) or nuitka (native C++ compilation).",
     )
     parser.add_argument(
+        "--arch",
+        choices=["both", "x64", "x86"],
+        default="both",
+        help="Target architecture to compile and package: both (default), x64, or x86.",
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Fast development compilation with Nuitka (disables LTO).",
+    )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Clean intermediate compiler build cache before compiling.",
+    )
+    parser.add_argument(
         "--wrapper-version",
         default=os.getenv("APP_WRAPPER_VERSION", os.getenv("WRAPPER_VERSION", "1.0.0")),
         help="Desktop wrapper version sent in the 'X-Wrapper-Version' request header (default: 1.0.0).",
@@ -82,15 +98,22 @@ def require_file(path: Path, label: str) -> Path:
     return resolved
 
 
-def clean_previous_builds() -> None:
-    """Remove only generated build products, preserving tools and downloads."""
-    generated_directories = (
-        PROJECT_ROOT / "build",
+def clean_previous_builds(clean_nuitka: bool = False) -> None:
+    """Remove generated build products, preserving tools, downloads, and Nuitka cache."""
+    generated_directories = [
         PROJECT_ROOT / "dist",
         INSTALLER_ROOT / "builds",
         INSTALLER_ROOT / "staging",
         INSTALLER_ROOT / "output",
-    )
+    ]
+    if clean_nuitka:
+        generated_directories.append(PROJECT_ROOT / "build" / "nuitka")
+
+    # Clean PyInstaller intermediate directory if present
+    pyi_build = PROJECT_ROOT / "build" / "DIGI Express Admin"
+    if pyi_build.is_dir():
+        shutil.rmtree(pyi_build, ignore_errors=True)
+
     generated_files = (
         PROJECT_ROOT / "DIGI Express Admin.spec",
     )
@@ -168,6 +191,8 @@ def build_app(
     builder: str = "pyinstaller",
     wrapper_version: str = "1.0.0",
     debug: bool = False,
+    fast: bool = False,
+    clean: bool = False,
 ) -> Path:
     print(f"\nBuilding {architecture} application with {builder.capitalize()}...")
     command = [
@@ -177,9 +202,15 @@ def build_app(
         builder,
         "--wrapper-version",
         wrapper_version,
+        "--arch",
+        architecture,
     ]
     if debug:
         command.append("--debug")
+    if fast:
+        command.append("--fast")
+    if clean:
+        command.append("--clean")
 
     subprocess.run(
         command,
@@ -204,19 +235,29 @@ def sha256_file(path: Path) -> str:
 
 def main() -> int:
     args = parse_args()
-    x64_python = require_file(args.x64_python, "x64 Python")
-    x86_python = require_file(args.x86_python, "x86 Python")
+    target_arch = args.arch
+    build_x64 = target_arch in ("both", "x64")
+    build_x86 = target_arch in ("both", "x86")
+
+    x64_python = require_file(args.x64_python, "x64 Python") if build_x64 else None
+    x86_python = require_file(args.x86_python, "x86 Python") if build_x86 else None
     iscc = require_file(args.iscc, "Inno Setup compiler")
 
-    x64_environment = python_environment(x64_python, "x64", builder=args.builder)
-    x86_environment = python_environment(x86_python, "x86", builder=args.builder)
-    if python_bits(x64_python, x64_environment) != 64:
+    x64_environment = python_environment(x64_python, "x64", builder=args.builder) if build_x64 and x64_python else None
+    x86_environment = python_environment(x86_python, "x86", builder=args.builder) if build_x86 and x86_python else None
+
+    if build_x64 and x64_python and x64_environment and python_bits(x64_python, x64_environment) != 64:
         raise SystemExit(f"Expected 64-bit Python: {x64_python}")
-    if python_bits(x86_python, x86_environment) != 32:
+    if build_x86 and x86_python and x86_environment and python_bits(x86_python, x86_environment) != 32:
         raise SystemExit(f"Expected 32-bit Python: {x86_python}")
 
     if args.embed_runtime:
-        for architecture in ("X86", "X64"):
+        check_arches = []
+        if build_x64:
+            check_arches.append("X64")
+        if build_x86:
+            check_arches.append("X86")
+        for architecture in check_arches:
             require_file(
                 INSTALLER_ROOT
                 / "downloads"
@@ -224,54 +265,71 @@ def main() -> int:
                 f"WebView2 {architecture} offline installer",
             )
 
-    clean_previous_builds()
+    clean_previous_builds(clean_nuitka=args.clean)
 
-    x64_app = build_app(
-        x64_python,
-        "x64",
-        x64_environment,
-        builder=args.builder,
-        wrapper_version=args.wrapper_version,
-        debug=args.debug,
-    )
-    x86_app = build_app(
-        x86_python,
-        "x86",
-        x86_environment,
-        builder=args.builder,
-        wrapper_version=args.wrapper_version,
-        debug=args.debug,
-    )
+    x64_app = None
+    x86_app = None
 
-    # Keep the conventional standalone dist output as x64 after both builds.
-    dist_app = PROJECT_ROOT / "dist" / APP_EXE_NAME
-    shutil.copy2(x64_app, dist_app)
-    dist_checksum = sha256_file(dist_app)
-    dist_app.with_suffix(dist_app.suffix + ".sha256").write_text(
-        f"{dist_checksum}  {dist_app.name}\n",
-        encoding="utf-8",
-    )
+    if build_x64 and x64_python and x64_environment:
+        x64_app = build_app(
+            x64_python,
+            "x64",
+            x64_environment,
+            builder=args.builder,
+            wrapper_version=args.wrapper_version,
+            debug=args.debug,
+            fast=args.fast,
+            clean=args.clean,
+        )
+    if build_x86 and x86_python and x86_environment:
+        x86_app = build_app(
+            x86_python,
+            "x86",
+            x86_environment,
+            builder=args.builder,
+            wrapper_version=args.wrapper_version,
+            debug=args.debug,
+            fast=args.fast,
+            clean=args.clean,
+        )
+
+    # For dist output, prefer x64 if built, otherwise x86
+    primary_app = x64_app or x86_app
+    if primary_app:
+        dist_app = PROJECT_ROOT / "dist" / APP_EXE_NAME
+        if not dist_app.exists() or dist_app != primary_app:
+            shutil.copy2(primary_app, dist_app)
+        dist_checksum = sha256_file(dist_app)
+        dist_app.with_suffix(dist_app.suffix + ".sha256").write_text(
+            f"{dist_checksum}  {dist_app.name}\n",
+            encoding="utf-8",
+        )
 
     for architecture, source in (("x86", x86_app), ("x64", x64_app)):
-        destination = INSTALLER_ROOT / "staging" / architecture / APP_EXE_NAME
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        if source is not None:
+            destination = INSTALLER_ROOT / "staging" / architecture / APP_EXE_NAME
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
 
+    setup_base_name = "DIGI-Express-Admin-Setup" if target_arch == "both" else f"DIGI-Express-Admin-Setup-{target_arch}"
     embed_runtime_flag = "true" if args.embed_runtime else "false"
-    print(f"\nCompiling combined installer (embed offline runtime: {embed_runtime_flag})...")
+    print(f"\nCompiling combined installer (arch: {target_arch}, embed offline runtime: {embed_runtime_flag})...")
+    iscc_command = [
+        str(iscc),
+        f"/DAppVersion={args.wrapper_version}",
+        f"/DEmbedWebView2Runtime={embed_runtime_flag}",
+        f"/DSingleArch={target_arch}",
+        f"/DOutputBaseFilename={setup_base_name}",
+        str(INSTALLER_ROOT / "DIGI Express Admin.iss"),
+    ]
     subprocess.run(
-        [
-            str(iscc),
-            f"/DAppVersion={args.wrapper_version}",
-            f"/DEmbedWebView2Runtime={embed_runtime_flag}",
-            str(INSTALLER_ROOT / "DIGI Express Admin.iss"),
-        ],
+        iscc_command,
         cwd=INSTALLER_ROOT,
         check=True,
     )
 
     installer = require_file(
-        INSTALLER_ROOT / "output" / "DIGI-Express-Admin-Setup.exe",
+        INSTALLER_ROOT / "output" / f"{setup_base_name}.exe",
         "compiled installer",
     )
     checksum = sha256_file(installer)

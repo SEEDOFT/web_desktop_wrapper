@@ -11,16 +11,28 @@
     Compilation engine to use: 'nuitka' (default) or 'pyinstaller'.
 
 .PARAMETER Installer
-    Build the full dual-architecture (x64 + x86) offline Windows Setup installer
-    via Inno Setup instead of just the standalone executable.
+    Build offline Windows Setup installer via Inno Setup instead of just the standalone executable.
+
+.PARAMETER Fast
+    Fast development build with Nuitka (disables LTO, builds standalone directory for quick iteration).
+
+.PARAMETER Clean
+    Clean cached compiler intermediate build artifacts before compiling.
+
+.PARAMETER Arch
+    Target architecture to compile: 'both' (default for installer), 'x64', or 'x86'.
+
+.PARAMETER Reinstall
+    Force reinstallation of dependencies from requirements.txt even if unchanged.
 
 .PARAMETER Debug
     Keep console window attached to view stdout/stderr and tracebacks.
 
 .EXAMPLE
     .\build.ps1
-    .\build.ps1 -Builder nuitka
-    .\build.ps1 -Installer
+    .\build.ps1 -Builder nuitka -Fast
+    .\build.ps1 -Builder nuitka -Clean
+    .\build.ps1 -Installer -Arch x64
     .\build.ps1 -Builder nuitka -Installer
 #>
 
@@ -31,13 +43,23 @@ param(
 
     [switch]$Installer,
 
-    [switch]$Debug,
+    [switch]$Fast,
+
+    [switch]$Clean,
+
+    [ValidateSet("both", "x64", "x86")]
+    [string]$Arch = "both",
+
+    [switch]$Reinstall,
 
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ExtraArgs
 )
 
 $ErrorActionPreference = "Stop"
+
+# CmdletBinding supplies -Debug as a common parameter; do not redeclare it.
+$debugBuild = $PSBoundParameters.ContainsKey("Debug") -and [bool]$PSBoundParameters["Debug"]
 
 $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $RootDir
@@ -89,29 +111,55 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 }
 
 # ── Step 3: Install Windows Requirements ──────────────────────────────────────
-Write-Host "[3/4] Installing / updating dependencies from requirements.txt ..." -ForegroundColor Yellow
-& $venvPython -m pip install --upgrade pip --quiet
-& $venvPython -m pip install -r (Join-Path $RootDir "requirements.txt") --quiet
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "[ERROR] Failed to install requirements."
-    exit 1
+$reqFile = Join-Path $RootDir "requirements.txt"
+$reqStampFile = Join-Path $venvDir ".requirements.sha256"
+$currentReqHash = (Get-FileHash -LiteralPath $reqFile -Algorithm SHA256).Hash
+$cachedReqHash = if (Test-Path -LiteralPath $reqStampFile) { (Get-Content -LiteralPath $reqStampFile -ErrorAction SilentlyContinue).Trim() } else { "" }
+
+if ($Reinstall -or ($currentReqHash -ne $cachedReqHash)) {
+    Write-Host "[3/4] Installing / updating dependencies from requirements.txt ..." -ForegroundColor Yellow
+    & $venvPython -m pip install -r $reqFile --quiet
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "[ERROR] Failed to install requirements."
+        exit 1
+    }
+    Set-Content -LiteralPath $reqStampFile -Value $currentReqHash -Encoding utf8
+} else {
+    Write-Host "[3/4] Dependencies up-to-date (skipping pip install). Use -Reinstall to force." -ForegroundColor Green
 }
 
 # ── Step 4: Run Windows Build ──────────────────────────────────────────────────
 $buildScriptArgs = @()
 
 if ($Installer) {
-    Write-Host "[4/4] Building Windows Setup installer via Inno Setup (Builder: $Builder) ..." -ForegroundColor Cyan
+    Write-Host "[4/4] Building Windows Setup installer via Inno Setup (Builder: $Builder, Arch: $Arch) ..." -ForegroundColor Cyan
     $targetScript = Join-Path $RootDir "tools\build_installer.py"
     $buildScriptArgs += "--builder", $Builder
-    if ($Debug) {
+    $buildScriptArgs += "--arch", $Arch
+    if ($Fast) {
+        $buildScriptArgs += "--fast"
+    }
+    if ($Clean) {
+        $buildScriptArgs += "--clean"
+    }
+    if ($debugBuild) {
         $buildScriptArgs += "--debug"
     }
 } else {
-    Write-Host "[4/4] Building standalone Windows executable (Builder: $Builder) ..." -ForegroundColor Cyan
+    $modeTag = if ($Fast) { " [Fast mode]" } else { "" }
+    Write-Host "[4/4] Building standalone Windows executable (Builder: $Builder$modeTag) ..." -ForegroundColor Cyan
     $targetScript = Join-Path $RootDir "tools\build.py"
     $buildScriptArgs += "--builder", $Builder
-    if ($Debug) {
+    if ($Arch -and $Arch -ne "both") {
+        $buildScriptArgs += "--arch", $Arch
+    }
+    if ($Fast) {
+        $buildScriptArgs += "--fast"
+    }
+    if ($Clean) {
+        $buildScriptArgs += "--clean"
+    }
+    if ($debugBuild) {
         $buildScriptArgs += "--debug"
     }
 }

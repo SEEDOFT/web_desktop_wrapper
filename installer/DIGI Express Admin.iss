@@ -7,6 +7,14 @@
   #define EmbedWebView2Runtime "true"
 #endif
 
+#ifndef SingleArch
+  #define SingleArch "both"
+#endif
+
+#ifndef OutputBaseFilename
+  #define OutputBaseFilename "DIGI-Express-Admin-Setup"
+#endif
+
 [Setup]
 AppId={{890AE9BF-E4E0-4F14-96B1-7C93EB7ABF7C}
 AppName={#AppName}
@@ -16,25 +24,40 @@ DefaultDirName={autopf}\{#AppPublisher}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=output
-OutputBaseFilename=DIGI-Express-Admin-Setup
+OutputBaseFilename={#OutputBaseFilename}
 SetupIconFile=..\assets\digi_express.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
+#if SingleArch == "x64"
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+#elif SingleArch == "x86"
+ArchitecturesAllowed=x86compatible x64compatible
+#else
 ArchitecturesAllowed=x86compatible x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+#endif
 MinVersion=10.0
 CloseApplications=yes
 RestartApplications=no
 
 [Files]
+#if SingleArch == "x64" || SingleArch == "both"
 Source: "staging\x64\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion; Check: IsWin64
+#endif
+#if SingleArch == "x86" || SingleArch == "both"
 Source: "staging\x86\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion; Check: not IsWin64
+#endif
 #if EmbedWebView2Runtime == "true"
+#if SingleArch == "x64" || SingleArch == "both"
 Source: "downloads\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: IsWin64 and WebView2NeedsInstall
+#endif
+#if SingleArch == "x86" || SingleArch == "both"
 Source: "downloads\MicrosoftEdgeWebView2RuntimeInstallerX86.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: (not IsWin64) and WebView2NeedsInstall
+#endif
 #endif
 
 [Icons]
@@ -43,8 +66,12 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 
 [Run]
 #if EmbedWebView2Runtime == "true"
+#if SingleArch == "x64" || SingleArch == "both"
 Filename: "{tmp}\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"; Parameters: "/silent /install"; StatusMsg: "Installing Microsoft Edge WebView2 Runtime..."; Flags: waituntilterminated; Check: IsWin64 and WebView2NeedsInstall
+#endif
+#if SingleArch == "x86" || SingleArch == "both"
 Filename: "{tmp}\MicrosoftEdgeWebView2RuntimeInstallerX86.exe"; Parameters: "/silent /install"; StatusMsg: "Installing Microsoft Edge WebView2 Runtime..."; Flags: waituntilterminated; Check: (not IsWin64) and WebView2NeedsInstall
+#endif
 #endif
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
 

@@ -59,10 +59,16 @@ A native desktop wrapper for modern web applications powered by **Microsoft Edge
 
 #### Windows (PowerShell):
 ```powershell
-# Automatically sets up .venv, installs dependencies, and builds with Nuitka
-.\build.ps1
+# Fast development build with Nuitka (recommended, ~2 min incremental):
+.\build.ps1 -Builder nuitka -Fast
 
-# Or build the complete offline Windows Setup installer:
+# Production release build (single-file executable + Link-Time Optimization):
+.\build.ps1 -Builder nuitka
+
+# Build Windows Setup installer for 64-bit systems:
+.\build.ps1 -Installer -Arch x64 --no-embed-runtime
+
+# Or build the complete offline dual-architecture (x64 + x86) Windows Setup installer:
 .\build.ps1 -Installer
 ```
 
@@ -74,6 +80,9 @@ A native desktop wrapper for modern web applications powered by **Microsoft Edge
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+
+# If 'pip' is missing after creating .venv (common with Windows Store Python), run:
+# python -m ensurepip --default-pip
 
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
@@ -246,6 +255,9 @@ The script embeds the `.env` configuration into the binary, builds, and writes a
 
 #### Step 1.6 — Custom build options
 ```powershell
+# Fast development build with Nuitka (~2 min incremental, disables LTO)
+python tools/build.py --builder nuitka --fast
+
 # Specify a custom starting URL and allow specific auth hosts
 python tools/build.py `
   --url "https://app.company.com" `
@@ -313,13 +325,19 @@ Follow Step 1.4 above (`.env` must already exist and be configured).
 
 #### Step 2.5 — Build the installer
 ```powershell
-# Standard offline installer (bundles offline WebView2 runtimes, ~300MB)
+# 64-bit installer only (recommended for 64-bit dev machines, single-architecture)
+python tools/build_installer.py --arch x64 --no-embed-runtime
+
+# Fast 64-bit installer with Nuitka (disables LTO for rapid testing)
+python tools/build_installer.py --builder nuitka --arch x64 --fast --no-embed-runtime
+
+# Standard offline dual-architecture (x64 + x86) installer (requires 32-bit Python & offline runtimes, ~300MB)
 python tools/build_installer.py
 
-# Lightweight installer without embedded offline WebView2 runtimes
+# Lightweight dual-architecture installer without embedded offline WebView2 runtimes
 python tools/build_installer.py --no-embed-runtime
 
-# Build installer using Nuitka native C++ compilation
+# Build full release installer using Nuitka native C++ compilation
 python tools/build_installer.py --builder nuitka
 ```
 
@@ -530,10 +548,14 @@ first-launch confirmation.
 | **Binary size** | Smaller | Larger |
 | **Use case** | Development, internal tools | Production distribution, customer-facing apps |
 
-**Nuitka build tips:**
-- First builds are slow due to full C compilation. Subsequent builds reuse cached `.c` files.
-- Use `--onedir` during development to skip the single-file compression step.
-- Use `--debug` to keep the console window open for troubleshooting startup issues.
+**Nuitka build tips & acceleration:**
+- **Fast Development Mode**: Use `.\build.ps1 -Fast` (or `python tools/build.py --builder nuitka --fast`) during development. This disables slow whole-program Link-Time Optimization (`--lto=no`) and builds a standalone directory bundle instead of packing into onefile, dramatically reducing build times.
+- **Incremental Caching**: Intermediate compiled C and object files are preserved in `build/nuitka/<arch>/`. Subsequent builds recompile only modified Python files.
+- **Single-Architecture Installer**: Use `.\build.ps1 -Installer -Arch x64` to build an installer targeting 64-bit only, cutting installer compile time in half during development.
+- **Anti-bloat Pruning**: The build automatically excludes unused GUI backends (`qt`, `gtk`, `cef`, `cocoa`, `mshtml`) and unused test/doc modules (`--noinclude-default-mode=nofollow`), preventing hundreds of irrelevant C files from being compiled.
+- **Dependency Caching**: `build.ps1` hashes `requirements.txt` and skips running `pip install` on every build unless requirements change (use `-Reinstall` to force).
+- **Clean Rebuilds**: Use `-Clean` (e.g. `.\build.ps1 -Clean`) to clear the intermediate compiler cache and build from scratch when needed.
+- **Windows Defender Antivirus**: The C compiler writes thousands of temporary `.c` and `.obj` files. Adding an exclusion for the project `build` directory and `$env:LOCALAPPDATA\Nuitka` in Windows Defender can boost compilation speed by 1.5x–3x.
 
 ---
 
